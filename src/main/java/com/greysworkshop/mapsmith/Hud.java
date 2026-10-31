@@ -48,7 +48,7 @@ final class Hud {
 					lines.add(Text.translatable("mapsmith.hud.check", String.format("%.1f", pct), check.wrong, check.unknown).formatted(f));
 				}
 				if (Builder.state != Builder.State.OFF) {
-					Text s = Builder.status;
+					Text s = Builder.state == Builder.State.DONE ? Text.translatable("mapsmith.hud.done").formatted(Formatting.GREEN) : Builder.status;
 					if (Builder.running()) {
 						s = Text.translatable("mapsmith.hud.builder", Builder.placed, String.format("%.1f", Builder.rate())).append(" · ").append(s);
 					}
