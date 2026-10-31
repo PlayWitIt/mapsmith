@@ -56,6 +56,8 @@ final class Builder {
 	static final Map<Block, Integer> missing = new LinkedHashMap<>();
 	private static int tick, idleTicks, failures, goalAge;
 	private static boolean skippedAny;
+	/** Ticks to wait before looking for a path again, after one wasn't found. */
+	private static int planWait;
 	/** Only build this part: pixel columns and rows {minX, minZ, maxX, maxZ}, inclusive; null for all of it. */
 	static int[] region;
 
@@ -186,10 +188,13 @@ final class Builder {
 		boolean didSomething = false;
 		BlockPos blockedBySelf = null;
 
-		if (MapsmithConfig.INSTANCE.fixMistakes && !brk.isEmpty()) {
-			Vec3d eye = player.getEyePos();
-			brk.sort(Comparator.comparingDouble(p -> -p.getY() * 100 + eye.squaredDistanceTo(Vec3d.ofCenter(p))));
-			startBreaking(client, player, world, brk.get(0));
+		// Wrong blocks where something must go come first; clearing the space above the art (including pillars it went
+		// up on) waits until there's nothing to place.
+		List<BlockPos> urgent = brk.stream().filter(p -> plan.kind(p.getX(), p.getY(), p.getZ()) != Plan.Kind.CLEAR).toList();
+		// Nothing gets broken while pillaring up.
+		boolean fix = MapsmithConfig.INSTANCE.fixMistakes && !walker.towering();
+		if (fix && !urgent.isEmpty()) {
+			startBreaking(client, player, world, nearest(player, urgent));
 			didSomething = true;
 		} else if (!place.isEmpty()) {
 			Vec3d eye = player.getEyePos();
@@ -216,8 +221,18 @@ final class Builder {
 				}
 			}
 		}
+		if (!didSomething && fix && !brk.isEmpty()) {
+			startBreaking(client, player, world, nearest(player, brk));
+			didSomething = true;
+		}
+		if (didSomething && walker.towering()) {
+			// Halfway up a pillar: keep jumping and placing under, whatever else gets placed meanwhile.
+			walker.tick(client);
+			return;
+		}
 		if (didSomething) {
 			spent[brk.isEmpty() ? 0 : 1]++;
+			failures = 0;
 			walker.stop(client);
 			idleTicks = 0;
 			goal = null;
@@ -253,10 +268,39 @@ final class Builder {
 					BlockState s = world.getBlockState(pos);
 					Need n = need(plan, world, pos, s);
 					if (n == Need.PLACE) place.add(pos.toImmutable());
-					else if (n == Need.BREAK) brk.add(pos.toImmutable());
+					// Never the block it's standing on (say, the top of a pillar it went up on): that goes once it steps off.
+					else if (n == Need.BREAK && !holdsUp(player, pos)) brk.add(pos.toImmutable());
 				}
 			}
 		}
+	}
+
+	/**
+	 * Whether a pillar can go up through {@code cell}: not where a pixel's block goes, and with everything the column
+	 * needs below it already there (a pillar would cut it off).
+	 */
+	private static boolean pillarable(Plan plan, ClientWorld world, BlockPos cell) {
+		if (plan.kind(cell.getX(), cell.getY(), cell.getZ()) == Plan.Kind.ART) return false;
+		BlockPos.Mutable p = new BlockPos.Mutable();
+		for (int y = plan.y0 - 1; y < cell.getY(); y++) {
+			p.set(cell.getX(), y, cell.getZ());
+			if (need(plan, world, p, world.getBlockState(p)) == Need.PLACE) return false;
+		}
+		return true;
+	}
+
+	/** The highest of the blocks, nearest first among equals: break from the top down. */
+	private static BlockPos nearest(ClientPlayerEntity player, List<BlockPos> list) {
+		Vec3d eye = player.getEyePos();
+		return list.stream().min(Comparator.comparingDouble(p -> -p.getY() * 100 + eye.squaredDistanceTo(Vec3d.ofCenter(p)))).orElseThrow();
+	}
+
+	/** Whether the block at {@code pos} is under the player's feet. */
+	private static boolean holdsUp(ClientPlayerEntity player, BlockPos pos) {
+		net.minecraft.util.math.Box box = player.getBoundingBox();
+		// Up to a jump's height below: mid-jump it's still what it lands on.
+		return pos.getY() + 1 <= box.minY + 0.1 && pos.getY() + 1 >= box.minY - 1.5
+				&& pos.getX() + 1 > box.minX && pos.getX() < box.maxX && pos.getZ() + 1 > box.minZ && pos.getZ() < box.maxZ;
 	}
 
 	enum Result { PLACED, NO_SUPPORT, NO_ITEM, IN_THE_WAY }
@@ -319,6 +363,22 @@ final class Builder {
 		if (inv.getStack(selected).isOf(item)) return selected;
 		for (int i = 0; i < PlayerInventory.MAIN_SIZE; i++) if (inv.getStack(i).isOf(item)) return i;
 		return -1;
+	}
+
+	/** Pillaring up: the filler block into {@code cell}, against the block under it. */
+	private static boolean placeFiller(MinecraftClient client, ClientPlayerEntity player, ClientWorld world, Plan plan, BlockPos cell) {
+		int slot = find(player.getInventory(), plan.filler.asItem());
+		BlockPos below = cell.down();
+		if (slot < 0 || !BlockPalette.solid(world.getBlockState(below))) {
+			debug("can't pillar up at {}: {}", cell, slot < 0 ? "no " + plan.filler : "nothing under it (" + world.getBlockState(below) + ")");
+			return false;
+		}
+		select(client, player, slot);
+		BlockHitResult hit = new BlockHitResult(Vec3d.ofCenter(below).add(0, 0.5, 0), Direction.UP, below, false);
+		client.interactionManager.interactBlock(player, Hand.MAIN_HAND, hit);
+		player.swingHand(Hand.MAIN_HAND);
+		debug("pillared up at {}", cell);
+		return true;
 	}
 
 	/** In creative, takes a stack of the item out of nowhere, into the hotbar. */
@@ -439,8 +499,18 @@ final class Builder {
 			skipNode.put(nodeKey(plan, goal), tick);
 			goal = null;
 		}
+		if (planWait > 0) {
+			planWait--;
+			return;
+		}
 		skipNode.values().removeIf(t -> tick - t > 400);
 		BlockPos target = blockedBySelf != null ? blockedBySelf : nextTarget(plan, world, player);
+		if (target == null && !skippedAny) {
+			// Before calling it done, look over all of it again from the start: the server can undo a block after the
+			// strip it's in was passed.
+			cursorLane = 0;
+			target = nextTarget(plan, world, player);
+		}
 		if (target == null && skippedAny && missing.isEmpty()) {
 			// Everything left was put off: try it all again, but not forever.
 			skipNode.clear();
@@ -467,12 +537,24 @@ final class Builder {
 		}
 		int[] bounds = {plan.x0 - 6, plan.y0 - 3, plan.z0 - 7, plan.x0 + plan.width() + 5, plan.topY() + 3, plan.z0 + plan.height() + 5};
 		BlockPos t = target;
+		boolean canTower = find(player.getInventory(), plan.filler.asItem()) >= 0;
+		walker.placeUnder = cell -> placeFiller(client, player, world, plan, cell);
+		walker.breakUnder = cell -> {
+			if (breaking == null) startBreaking(client, player, world, cell);
+			return true;
+		};
 		boolean ok = walker.plan(world, player, feet -> {
-			if (feet.equals(t) || feet.up().equals(t)) return false;
+			// Not in the way of it, nor standing on it.
+			if (feet.equals(t) || feet.up().equals(t) || feet.down().equals(t)) return false;
 			Vec3d eye = new Vec3d(feet.getX() + 0.5, feet.getY() + 1.62, feet.getZ() + 0.5);
 			return eye.squaredDistanceTo(Vec3d.ofCenter(t)) <= (r - 0.6) * (r - 0.6);
-		}, bounds);
+		}, bounds, canTower ? cell -> cell.getY() < t.getY() && !(cell.getX() == t.getX() && cell.getZ() == t.getZ())
+				// Only inside the art: there a pillar is either hidden under it or cleared away as the builder goes.
+				&& inRegion(plan, cell.getX(), cell.getZ()) && pillarable(plan, world, cell) : null,
+				// Down through anything that has to go anyway: a pillar it went up on, something over the art.
+				cell -> plan.kind(cell.getX(), cell.getY(), cell.getZ()) == Plan.Kind.CLEAR && MapsmithConfig.INSTANCE.fixMistakes);
 		if (!ok) {
+			planWait = 5;
 			debug("no path to {}", target);
 			skipNode.put(nodeKey(plan, target), tick);
 			goal = null;

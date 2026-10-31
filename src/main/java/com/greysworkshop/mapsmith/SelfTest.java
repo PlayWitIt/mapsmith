@@ -109,6 +109,7 @@ final class SelfTest {
 					picture = writePicture(client);
 					try {
 						Project p = Project.create(picture);
+						staircase = p;
 						p.settings.mode = ArtSettings.Mode.STAIRCASE;
 						p.settings.maxHeight = 20;
 						p.save();
@@ -126,6 +127,11 @@ final class SelfTest {
 					Plan plan = Mapsmith.plan();
 					check("placed on the map grid: corner -64,-64 at y -60 (" + (plan == null ? "none" : plan.x0 + "," + plan.y0 + "," + plan.z0) + ")",
 							plan != null && plan.x0 == -64 && plan.z0 == -64 && plan.y0 == -60);
+					if (Boolean.getBoolean("mapsmith.selftest.stairs")) {
+						command(client, "gamemode survival @p");
+						next("stairs_setup");
+						return;
+					}
 					client.setScreen(new StudioScreen(null));
 					next("studio_shot");
 				}
@@ -214,6 +220,8 @@ final class SelfTest {
 			}
 			case "survival_setup" -> survivalSetup(client, since);
 			case "survival_build" -> survivalBuild(client, since);
+			case "stairs_setup" -> stairsSetup(client, since);
+			case "stairs_build" -> stairsBuild(client, since);
 			case "finish" -> {
 				if (since == 40) finish(client);
 			}
@@ -236,6 +244,72 @@ final class SelfTest {
 			}
 		}
 		return new int[] {right, wrong};
+	}
+
+	private static Project staircase;
+	/** Survival on staircase art: a strip of the first art the creative test didn't build. */
+	private static final int[] STAIRS = {40, 0, 51, 19};
+
+	private static void stairsSetup(MinecraftClient client, int since) {
+		if (since == 1) {
+			Builder.stop(client, Builder.State.OFF, net.minecraft.text.Text.empty());
+			command(client, "clear @p");
+			command(client, "tp @p -18.5 -60 -67.5 180 30");
+			try {
+				Mapsmith.open(Project.load(staircase.dir()));
+			} catch (IOException e) {
+				check("staircase project reopens (" + e + ")", false);
+			}
+		}
+		if (since == 40) {
+			Plan plan = Mapsmith.plan();
+			check("the staircase art reopens where it was placed", plan != null && plan.x0 == -64 && plan.layout.maxLevel > 3);
+			if (plan == null) {
+				next("finish");
+				return;
+			}
+			Builder.region = STAIRS;
+			Map<Block, Integer> need = new java.util.LinkedHashMap<>();
+			for (int x = STAIRS[0]; x <= STAIRS[2]; x++) {
+				for (int node = 0; node <= STAIRS[3] + 1; node++) {
+					for (int lv = plan.layout.supportFrom[x][node]; lv <= plan.level(x, node); lv++) {
+						Block b = plan.blockToPlace(plan.x0 + x, plan.y0 + lv, plan.z0 + node - 1);
+						if (b != null) need.merge(b, 1, Integer::sum);
+					}
+				}
+			}
+			command(client, "give @p minecraft:diamond_pickaxe");
+			// Spare filler, to pillar up with.
+			need.merge(plan.filler, 64, Integer::sum);
+			int total = 0;
+			for (Map.Entry<Block, Integer> e : need.entrySet()) {
+				command(client, "give @p " + Registries.ITEM.getId(e.getKey().asItem()) + " " + (e.getValue() + 2));
+				total += e.getValue();
+			}
+			log("staircase region needs " + total + " blocks of " + need.size() + " kinds, " + (plan.layout.maxLevel + 1) + " high at most");
+		}
+		if (since == 60) {
+			startX = client.player.getX();
+			startZ = client.player.getZ();
+			Builder.start(client);
+			next("stairs_build");
+		}
+	}
+
+	private static void stairsBuild(MinecraftClient client, int since) {
+		if (since % 200 == 0) log("stairs: " + Builder.state + " placed " + Builder.placed + " at " + client.player.getBlockPos().toShortString()
+				+ " · " + Builder.status.getString());
+		if (since == 300) screenshot(client, "9_stairs_building");
+		if (since > 20 && Builder.state != Builder.State.RUNNING || since > 14000) {
+			check("survival staircase: finishes (" + Builder.status.getString() + ")", Builder.state == Builder.State.DONE);
+			MapCheck c = new MapCheck(Mapsmith.plan());
+			c.step(client.world, 128);
+			int[] score = regionScore(Mapsmith.plan(), c.seen, STAIRS);
+			check("survival staircase: every pixel maps right (" + score[0] + " right, " + score[1] + " wrong)", score[1] == 0);
+			screenshot(client, "10_stairs_done");
+			Builder.stop(client, Builder.State.OFF, net.minecraft.text.Text.empty());
+			next("finish");
+		}
 	}
 
 	/** Region of the survival test: pixels 0..15 both ways (with the reference row). */
@@ -322,7 +396,7 @@ final class SelfTest {
 			check("survival: walked to do it (" + String.format("%.1f", walked) + " blocks from the start)", walked > 3);
 			check("survival: broke the wrong block (" + Builder.broken + " broken)", Builder.broken >= 1);
 			screenshot(client, "8_survival_done");
-			next("finish");
+			next("stairs_setup");
 		}
 		if (since > 12000) {
 			check("survival build finished in time (" + Builder.status.getString() + ")", false);

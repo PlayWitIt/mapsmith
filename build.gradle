@@ -64,5 +64,11 @@ loom {
 			vmArgs "-Dmapsmith.selftest=true", "-Dmapsmith.debug=true", "-Xmx1536m"
 			runDir "run"
 		}
+		stairsTest {
+			client()
+			name = "Stairs Test"
+			vmArgs "-Dmapsmith.selftest=true", "-Dmapsmith.selftest.stairs=true", "-Dmapsmith.debug=true", "-Xmx1536m"
+			runDir "run"
+		}
 	}
 }

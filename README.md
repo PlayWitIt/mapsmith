@@ -53,7 +53,8 @@ By **PlayWit Creations**.
   and swaps the right block, or the best tool, into the hotbar. It breaks wrong blocks and anything in the way, fills
   holes in the ground, and moves on a strip at a time:
   - In **survival** it walks using its own pathfinder over the blocks that are there. It steps up one block, drops
-    up to three, and never steps into lava, fire or cactus.
+    up to three (five if there's no other way), and never steps into lava, fire or cactus. Where the art is higher than
+    anything it can climb, it pillars up with the support block, and clears the pillar away afterwards.
   - In **creative** it flies over the art, and takes the blocks out of the creative inventory.
   - When it runs out of a block it pauses and says which. Press G again once you have more. It also pauses at low
     health.
@@ -80,6 +81,7 @@ supports. Their corner goes on the west end of the reference row; the file name 
 ## Building from source
 Requires JDK 21. `./gradlew build` builds the jar into `build/libs/`. `./gradlew test` runs the converter tests: every
 pixel's shade checked against the game's shading formula, height limits, and whether every block can be placed.
-`./gradlew runSelfTest` builds staircase art in creative and checks that a real in-game map of it matches pixel for
-pixel. It then builds flat carpet art in survival, with a wrong block to fix, a hole to fill and a block to run out
-of. Screenshots go to `run/screenshots/`.
+`./gradlew runSelfTest` builds part of a staircase art in creative and checks that a real in-game map of it matches
+pixel for pixel. It then builds flat carpet art in survival (with a wrong block to fix, a hole to fill and a block to
+run out of), and then staircase art in survival, on foot. `./gradlew runStairsTest` runs only that last part.
+Screenshots go to `run/screenshots/`.

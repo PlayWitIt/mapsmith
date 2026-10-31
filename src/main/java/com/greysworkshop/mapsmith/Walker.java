@@ -19,8 +19,8 @@ import java.util.function.Predicate;
 
 /**
  * Gets the player where the builder needs them: finds a path over the blocks that are there (stepping up one, dropping
- * up to three, never into lava or fire) and walks it by pressing the movement keys. In creative it flies instead: up
- * above the art, across, and down.
+ * up to five, more than three only if there's no other way, never into lava or fire), pillaring up where it must, and
+ * walks it by pressing the movement keys. In creative it flies instead: up above what's in the way, across, and down.
  */
 final class Walker {
 	private static final int MAX_NODES = 40_000;
@@ -29,7 +29,6 @@ final class Walker {
 	private int at;
 	private Vec3d flyTo;
 	private int stuckTicks;
-	private Vec3d lastPos = Vec3d.ZERO;
 	private boolean moving;
 
 	boolean moving() {
@@ -83,7 +82,17 @@ final class Walker {
 	 * maxX, maxY, maxZ). False if there's none.
 	 */
 	boolean plan(ClientWorld world, ClientPlayerEntity player, Predicate<BlockPos> goal, int[] bounds) {
+		return plan(world, player, goal, bounds, null, null);
+	}
+
+	/**
+	 * As above; with {@code tower} (null for none), it may also pillar up: jump and place a block under itself, in cells
+	 * {@code tower} allows. That's how it reaches blocks higher than anything it can walk up to.
+	 */
+	boolean plan(ClientWorld world, ClientPlayerEntity player, Predicate<BlockPos> goal, int[] bounds, Predicate<BlockPos> tower,
+			Predicate<BlockPos> dig) {
 		flyTo = null;
+		towerCell = null;
 		BlockPos start = feet(player);
 		if (goal.test(start)) {
 			path = List.of();
@@ -98,23 +107,48 @@ final class Walker {
 		best.put(start, 0.0);
 		int expanded = 0;
 		BlockPos found = null;
+		// Cells it would stand in on top of a block it placed itself.
+		java.util.Set<BlockPos> raised = new java.util.HashSet<>();
 		while (!open.isEmpty() && expanded < MAX_NODES) {
 			Node n = open.poll();
 			if (n.g > best.getOrDefault(n.pos, Double.MAX_VALUE)) continue;
 			expanded++;
-			if (goal.test(n.pos) && standable(world, n.pos)) {
+			if (goal.test(n.pos) && (standable(world, n.pos) || raised.contains(n.pos))) {
 				found = n.pos;
 				break;
+			}
+			// Dig down one: break the block we stand on (the top of a pillar, say), where dig allows it.
+			BlockPos down = n.pos.down();
+			if (dig != null && down.getY() >= bounds[1] && dig.test(down) && !passable(world, down)) {
+				double g = n.g + 3;
+				if (g < best.getOrDefault(down, Double.MAX_VALUE)) {
+					best.put(down, g);
+					from.put(down, n.pos);
+					open.add(new Node(down, g, g));
+				}
+			}
+			// Pillar up one: the cell we're in gets a block, we stand on it.
+			BlockPos up = n.pos.up();
+			if (tower != null && up.getY() <= bounds[4] && tower.test(n.pos) && passable(world, n.pos) && passable(world, up)
+					&& passable(world, up.up())) {
+				double g = n.g + 4;
+				if (g < best.getOrDefault(up, Double.MAX_VALUE)) {
+					best.put(up, g);
+					from.put(up, n.pos);
+					raised.add(up);
+					open.add(new Node(up, g, g));
+				}
 			}
 			for (int dx = -1; dx <= 1; dx++) {
 				for (int dz = -1; dz <= 1; dz++) {
 					if (dx == 0 && dz == 0) continue;
-					for (int dy = 1; dy >= -3; dy--) {
+					for (int dy = 1; dy >= -5; dy--) {
 						BlockPos next = n.pos.add(dx, dy, dz);
 						if (next.getX() < bounds[0] || next.getY() < bounds[1] || next.getZ() < bounds[2]
 								|| next.getX() > bounds[3] || next.getY() > bounds[4] || next.getZ() > bounds[5]) continue;
 						if (!canMove(world, n.pos, next, dx, dy, dz)) continue;
-						double cost = (dx != 0 && dz != 0 ? 1.414 : 1) + (dy > 0 ? 0.6 : dy < 0 ? -dy * 0.25 : 0);
+						// Drops over three blocks hurt a little: only when nothing else will do.
+							double cost = (dx != 0 && dz != 0 ? 1.414 : 1) + (dy > 0 ? 0.6 : dy < -3 ? 8 : dy < 0 ? -dy * 0.25 : 0);
 						if (!world.getBlockState(next).getFluidState().isEmpty()) cost += 3;
 						double g = n.g + cost;
 						if (g < best.getOrDefault(next, Double.MAX_VALUE)) {
@@ -139,7 +173,7 @@ final class Walker {
 		return true;
 	}
 
-	/** One step, from a cell to a neighbouring one up to one higher or three lower. Takes the first dy that works. */
+	/** One step, from a cell to a neighbouring one up to one higher or five lower. Takes the first dy that works. */
 	private static boolean canMove(ClientWorld world, BlockPos a, BlockPos b, int dx, int dy, int dz) {
 		if (!standable(world, b)) return false;
 		if (dy > 0 && !passable(world, a.up(2))) return false;
@@ -207,6 +241,22 @@ final class Walker {
 			return true;
 		}
 		BlockPos next = path.get(at);
+		BlockPos here = feet(player);
+		if (next.getX() == here.getX() && next.getZ() == here.getZ() && next.getY() == here.getY() + 1 && !standable(client.world, next)
+				|| towerCell != null && towerCell.equals(next.down()) && passable(client.world, towerCell)) {
+			if (towerCell == null && Boolean.getBoolean("mapsmith.debug")) Mapsmith.LOGGER.info("[builder] pillaring up from {}", next.down());
+			towerCell = next.down();
+			return tower(client, player, towerCell);
+		}
+		towerCell = null;
+		if (next.getX() == here.getX() && next.getZ() == here.getZ() && next.getY() == here.getY() - 1 && !passable(client.world, next)) {
+			// Digging down: stand still over it and break it.
+			release(client);
+			player.setVelocity(player.getVelocity().multiply(0.3, 1, 0.3));
+			breakUnder.test(next);
+			moving = true;
+			return checkStuck(client, player, Vec3d.ofBottomCenter(next));
+		}
 		Vec3d aim = Vec3d.ofBottomCenter(next);
 		double dx = aim.x - player.getX(), dz = aim.z - player.getZ();
 		double flat = Math.sqrt(dx * dx + dz * dz);
@@ -224,7 +274,7 @@ final class Walker {
 		// Slow down onto a narrow last step so it doesn't overshoot.
 		client.options.sneakKey.setPressed(at == path.size() - 1 && flat < 1.2);
 		moving = true;
-		return checkStuck(client, player);
+		return checkStuck(client, player, aim);
 	}
 
 	/** Flying speed, blocks per tick: about creative's own. */
@@ -263,7 +313,7 @@ final class Walker {
 		}
 		player.setVelocity(vx, vy, vz);
 		moving = true;
-		return checkStuck(client, player);
+		return checkStuck(client, player, flyTo == null ? pos : flyTo);
 	}
 
 	private static void release(MinecraftClient client) {
@@ -273,11 +323,53 @@ final class Walker {
 		client.options.sprintKey.setPressed(false);
 	}
 
-	private boolean checkStuck(MinecraftClient client, ClientPlayerEntity player) {
-		if (player.getEntityPos().squaredDistanceTo(lastPos) < 0.0004) stuckTicks++;
-		else stuckTicks = 0;
-		lastPos = player.getEntityPos();
-		if (stuckTicks > 40) {
+	boolean towering() {
+		return towerCell != null;
+	}
+
+	/** Where a pillar-up step puts its block, while one's under way. */
+	private BlockPos towerCell;
+	/** Places a block in a cell (against the block under it); true if it did. Set by the builder. */
+	Predicate<BlockPos> placeUnder = p -> false;
+	/** Starts breaking the block in a cell (the one under the player). Set by the builder. */
+	Predicate<BlockPos> breakUnder = p -> false;
+
+	/** One pillar-up step: centre over the cell, look down, jump, and put a block under at the top of the jump. */
+	private boolean tower(MinecraftClient client, ClientPlayerEntity player, BlockPos cell) {
+		release(client);
+		Vec3d centre = Vec3d.ofBottomCenter(cell);
+		double dx = centre.x - player.getX(), dz = centre.z - player.getZ();
+		Vec3d v = player.getVelocity();
+		player.setVelocity(dx * 0.4, v.y, dz * 0.4);
+		player.setPitch(90);
+		if (player.isOnGround() && player.getY() < cell.getY() + 0.5) client.options.jumpKey.setPressed(true);
+		if (player.getY() >= cell.getY() + 1.0 && passable(client.world, cell)) placeUnder.test(cell);
+		moving = true;
+		return checkStuck(client, player, centre.add(0, 1, 0));
+	}
+
+	/** Where the current step is headed, how close it has got, and how long since it got closer. */
+	private Vec3d heading;
+	private double closest;
+
+	/**
+	 * Stuck: no closer to where this step is headed for three seconds (jumping on the spot against a wall doesn't
+	 * count as getting anywhere).
+	 */
+	private boolean checkStuck(MinecraftClient client, ClientPlayerEntity player, Vec3d towards) {
+		double d = player.getEntityPos().distanceTo(towards);
+		if (heading == null || heading.squaredDistanceTo(towards) > 0.01) {
+			heading = towards;
+			closest = d;
+			stuckTicks = 0;
+		} else if (d < closest - 0.05) {
+			closest = d;
+			stuckTicks = 0;
+		} else {
+			stuckTicks++;
+		}
+		if (stuckTicks > 60) {
+			heading = null;
 			stop(client);
 			path = List.of();
 			flyTo = null;
