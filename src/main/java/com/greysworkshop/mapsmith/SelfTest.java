@@ -137,13 +137,15 @@ final class SelfTest {
 				if (since == 40) screenshot(client, "2_palette");
 				if (since == 42) client.setScreen(new MaterialsScreen(null, Mapsmith.art()));
 				if (since == 60) screenshot(client, "3_materials");
-				if (since == 62) {
+				if (since == 62) client.setScreen(new SettingsScreen(null));
+				if (since == 75) screenshot(client, "3b_settings");
+				if (since == 77) {
 					client.setScreen(null);
 					exports(client);
 					command(client, "tp @p -60.5 -59 -70.5 -45 40");
 				}
-				if (since == 90) screenshot(client, "4_ghosts_before");
-				if (since == 92) {
+				if (since == 105) screenshot(client, "4_ghosts_before");
+				if (since == 107) {
 					MapsmithConfig.INSTANCE.creativeSpeed = 400;
 					Builder.region = CREATIVE;
 					Builder.start(client);

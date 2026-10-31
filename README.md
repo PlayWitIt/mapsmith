@@ -57,7 +57,11 @@ By **PlayWit Creations**.
   - In **creative** it flies over the art, and takes the blocks out of the creative inventory.
   - When it runs out of a block it pauses and says which. Press G again once you have more. It also pauses at low
     health.
-  - It places 8 blocks a second by default (20 in creative), turning to look at each one as you would.
+  - It places 8 blocks a second by default (20 in creative), turning to look at each one as you would. The studio
+    says about how long the art will take.
+- **Settings** (in the studio, or Mod Menu's Config button): builder speed in survival and creative, looking at
+  blocks, fixing mistakes, moving on by itself, flying in creative, the ghosts and how far they're shown, the map and
+  chunk borders, and the progress lines at the top left.
 - **Map check**: as you build, Mapsmith works out what a map of the art would show from the loaded blocks, the same
   way the game draws one, and the HUD shows how much of it is right. Holding a map of the art shows how it compares
   with the art, pixel by pixel.

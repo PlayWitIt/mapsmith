@@ -113,7 +113,8 @@ final class StudioScreen extends Screen {
 			addDrawableChild(ButtonWidget.builder(t("new_from", pic.getFileName().toString()), b -> newProject(pic)).dimensions(x, y, 300, 20).build());
 			y += ROW;
 		}
-		addDrawableChild(ButtonWidget.builder(Text.translatable("gui.done"), b -> close()).dimensions(width / 2 - 75, height - 26, 150, 20).build());
+		addDrawableChild(ButtonWidget.builder(t("settings"), b -> client.setScreen(new SettingsScreen(this))).dimensions(width / 2 - 152, height - 26, 148, 20).build());
+		addDrawableChild(ButtonWidget.builder(Text.translatable("gui.done"), b -> close()).dimensions(width / 2 + 4, height - 26, 148, 20).build());
 	}
 
 	private static List<Path> loosePictures() {
@@ -223,6 +224,8 @@ final class StudioScreen extends Screen {
 				.tooltip(Tooltip.of(t("blocks.tip"))).build());
 		y += ROW;
 		addDrawableChild(ButtonWidget.builder(t("materials"), b -> client.setScreen(new MaterialsScreen(this, art))).dimensions(x, y, w, 20).build());
+		y += ROW;
+		addDrawableChild(ButtonWidget.builder(t("settings"), b -> client.setScreen(new SettingsScreen(this))).dimensions(x, y, w, 20).build());
 		y += ROW;
 		addDrawableChild(ButtonWidget.builder(t("reset"), b -> {
 			ArtSettings fresh = new ArtSettings();
@@ -447,8 +450,11 @@ final class StudioScreen extends Screen {
 		if (!status.isEmpty()) context.drawTextWithShadow(textRenderer, Text.literal(status), areaX + areaW - textRenderer.getWidth(status), 8, 0xFFFFFFFF);
 		Plan plan = Mapsmith.plan();
 		Project.Placement pl = art.project.placement;
-		String where = pl == null ? Text.translatable("mapsmith.studio.not_placed").getString()
-				: Text.translatable(plan != null ? "mapsmith.studio.placed_at" : "mapsmith.studio.placed_elsewhere", pl.x, pl.y, pl.z).getString();
+		long total = blocks + r.width + layout.supportCount();
+		boolean creative = client.player != null && client.player.getAbilities().creativeMode;
+		String eta = Text.translatable("mapsmith.studio.eta", minutes(total, creative ? MapsmithConfig.INSTANCE.creativeSpeed : MapsmithConfig.INSTANCE.speed)).getString();
+		String where = (pl == null ? Text.translatable("mapsmith.studio.not_placed").getString()
+				: Text.translatable(plan != null ? "mapsmith.studio.placed_at" : "mapsmith.studio.placed_elsewhere", pl.x, pl.y, pl.z).getString()) + " · " + eta;
 		context.drawTextWithShadow(textRenderer, Text.literal(textRenderer.trimToWidth(where, areaW)), PANEL + 6, bottom + 2, 0xFFAAAAAA);
 
 		if (mouseX >= pvX && mouseY >= pvY && mouseX < pvX + w && mouseY < pvY + h) {
@@ -465,6 +471,12 @@ final class StudioScreen extends Screen {
 			if (pl != null) tip.add(Text.translatable("mapsmith.studio.pixel_world", pl.x + px, pl.y + layout.level[px][py + 1], pl.z + py).formatted(Formatting.DARK_GRAY));
 			context.drawTooltip(textRenderer, tip, mouseX, mouseY);
 		}
+	}
+
+	/** About how long placing {@code blocks} takes at {@code perSecond}: "45 min", "3 h 10 min". */
+	private static String minutes(long blocks, int perSecond) {
+		long m = Math.max(1, Math.round(blocks / (double) Math.max(1, perSecond) / 60 * 1.15));
+		return m < 60 ? m + " min" : m / 60 + " h " + m % 60 + " min";
 	}
 
 	@Override
