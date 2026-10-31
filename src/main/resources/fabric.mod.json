@@ -1,0 +1,32 @@
+{
+	"schemaVersion": 1,
+	"id": "mapsmith",
+	"version": "${version}",
+	"name": "Mapsmith",
+	"description": "Map art from any picture: converts it to map colours (flat or three-shade staircase, with dithering), lines it up with the map grid, shows every block in the world, lists the materials, saves Litematica and WorldEdit schematics, and builds it for you. Client-side only.",
+	"authors": [
+		"PlayWit Creations"
+	],
+	"contact": {
+		"homepage": "https://github.com/PlayWitIt/mapsmith",
+		"sources": "https://github.com/PlayWitIt/mapsmith",
+		"issues": "https://github.com/PlayWitIt/mapsmith/issues"
+	},
+	"license": "MIT",
+	"environment": "client",
+	"entrypoints": {
+		"client": [
+			"com.greysworkshop.mapsmith.Mapsmith"
+		],
+		"modmenu": [
+			"com.greysworkshop.mapsmith.ModMenuIntegration"
+		]
+	},
+	"depends": {
+		"fabricloader": ">=0.18.0",
+		"minecraft": "~1.21.11",
+		"java": ">=21",
+		"fabric-api": "*"
+	},
+	"icon": "assets/mapsmith/icon.png"
+}
