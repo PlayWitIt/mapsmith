@@ -62,6 +62,13 @@ public final class Mapsmith implements ClientModInitializer {
 				LOGGER.error("Self-test missing", e);
 			}
 		}
+		if (Boolean.getBoolean("mapsmith.ultimate")) {
+			try {
+				Class.forName("com.greysworkshop.mapsmith.UltimateTest").getDeclaredMethod("start").invoke(null);
+			} catch (ReflectiveOperationException e) {
+				LOGGER.error("Ultimate test missing", e);
+			}
+		}
 	}
 
 	private static void tick(MinecraftClient client) {

@@ -54,6 +54,7 @@ test {
 // The scripted self-test is for development only.
 jar {
 	exclude 'com/greysworkshop/mapsmith/SelfTest*'
+	exclude 'com/greysworkshop/mapsmith/UltimateTest*'
 }
 
 loom {
@@ -62,6 +63,14 @@ loom {
 			client()
 			name = "Self Test"
 			vmArgs "-Dmapsmith.selftest=true", "-Dmapsmith.debug=true", "-Xmx1536m"
+			runDir "run"
+		}
+		ultimateTest {
+			client()
+			name = "Ultimate Test"
+			vmArgs "-Dmapsmith.ultimate=true", "-Dmapsmith.debug=true", "-Xmx1536m",
+					"-Dmapsmith.ultimate.region=${findProperty('ultRegion') ?: '40,16,71,47'}",
+					"-Dmapsmith.ultimate.minutes=${findProperty('ultMinutes') ?: 90}"
 			runDir "run"
 		}
 		stairsTest {

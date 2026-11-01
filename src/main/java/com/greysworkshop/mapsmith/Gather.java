@@ -53,6 +53,7 @@ final class Gather {
 	private static Item targetDrop;
 	private static int ticks, tries, mined, collectWait;
 	private static boolean gotAny;
+	private static int findTries;
 	/** How far from the art it goes looking. */
 	static final int RANGE = 96;
 
@@ -93,7 +94,7 @@ final class Gather {
 		for (Block b : Registries.BLOCK) {
 			String id = Registries.BLOCK.getId(b).getPath();
 			if (id.endsWith("_terracotta") && !id.contains("glazed") || id.endsWith("_log") || id.endsWith("_wood") || id.endsWith("_stem")
-					|| id.endsWith("_hyphae") || id.endsWith("_planks")) {
+					|| id.endsWith("_hyphae")) {
 				if (b != Blocks.MUSHROOM_STEM) SELF.add(b);
 			}
 		}
@@ -116,6 +117,46 @@ final class Gather {
 	/** Whether the builder could gather a block itself (for the palette's "only blocks I can gather"). */
 	static boolean gatherable(Block block, boolean silk) {
 		return !sources(block.asItem(), silk).isEmpty();
+	}
+
+	/** Enough of it to mine within reach of where it's found: a block seen fewer times than this isn't counted on. */
+	static final int ENOUGH = 24;
+
+	/** Whether there's enough of a block's sources lying about near the art (see {@link #available}). */
+	static boolean gatherableHere(Block block, boolean silk, Map<Block, Integer> available) {
+		int n = 0;
+		for (Block src : sources(block.asItem(), silk)) n += available.getOrDefault(src, 0);
+		return n >= ENOUGH;
+	}
+
+	/**
+	 * What can be mined near a spot: every block exposed to the air in the loaded chunks within {@link #RANGE}, from
+	 * the surface down to 8 below it, counted.
+	 */
+	static Map<Block, Integer> available(net.minecraft.world.World world, BlockPos center) {
+		Map<Block, Integer> out = new HashMap<>();
+		BlockPos.Mutable p = new BlockPos.Mutable();
+		for (int x = center.getX() - RANGE; x <= center.getX() + RANGE; x++) {
+			for (int z = center.getZ() - RANGE; z <= center.getZ() + RANGE; z++) {
+				if (!world.getChunkManager().isChunkLoaded(x >> 4, z >> 4)) continue;
+				int top = world.getTopY(net.minecraft.world.Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, x, z);
+				for (int y = top - 8; y <= top; y++) {
+					p.set(x, y, z);
+					BlockState s = world.getBlockState(p);
+					if (s.isAir() || !s.getFluidState().isEmpty()) continue;
+					boolean exposed = false;
+					for (Direction d : Direction.values()) {
+						BlockState n = world.getBlockState(p.offset(d));
+						if (n.isAir()) {
+							exposed = true;
+							break;
+						}
+					}
+					if (exposed) out.merge(s.getBlock(), 1, Integer::sum);
+				}
+			}
+		}
+		return out;
 	}
 
 	static boolean hasSilk(PlayerInventory inv) {
@@ -161,7 +202,9 @@ final class Gather {
 		ClientWorld world = client.world;
 		ticks++;
 		switch (step) {
-			case FIND -> find(client, player, world, plan);
+			case FIND -> {
+				if (ticks >= 0) find(client, player, world, plan);
+			}
 			case GO -> go(client, player, world, plan);
 			case MINE -> mine(client, player, world, plan);
 			case COLLECT -> collect(client, player, world);
@@ -200,11 +243,15 @@ final class Gather {
 					if (!world.getChunkManager().isChunkLoaded(x >> 4, z >> 4)) continue;
 					// Keep clear of the art and the strip around it.
 					if (x >= plan.x0 - 2 && x < plan.x0 + plan.width() + 2 && z >= plan.z0 - 3 && z < plan.z0 + plan.height() + 2) continue;
-					for (int y = Math.max(minY, feet.getY() - 6); y <= feet.getY() + 6; y++) {
+					int top = world.getTopY(net.minecraft.world.Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, x, z);
+					for (int y = Math.max(minY, Math.min(feet.getY() - 6, top - 8)); y <= Math.max(feet.getY() + 6, top + 4); y++) {
 						p.set(x, y, z);
 						BlockState s = world.getBlockState(p);
 						if (!from.containsKey(s.getBlock()) || skip.contains(p)) continue;
 						if (!safe(world, p)) continue;
+						// Never digging down: at most one below our feet, from the top, and not right beside us.
+						if (y < feet.getY() - 1) continue;
+						if (y == feet.getY() - 1 && (!world.getBlockState(p.up()).isAir() || Math.abs(dx) <= 1 && Math.abs(dz) <= 1)) continue;
 						double d = p.getSquaredDistance(feet) + Math.abs(y - feet.getY()) * 8;
 						if (d < best) {
 							best = d;
@@ -214,11 +261,17 @@ final class Gather {
 				}
 			}
 		}
+		if (found == null && ++findTries < 4) {
+			// The world round about may still be loading.
+			ticks = -40;
+			return;
+		}
 		if (found == null) {
 			Builder.debug("gather: nothing to mine for {} within {}", want.keySet(), RANGE);
 			to(Step.RETURN);
 			return;
 		}
+		findTries = 0;
 		target = found;
 		targetDrop = from.get(world.getBlockState(found).getBlock());
 		to(Step.GO);
@@ -238,6 +291,37 @@ final class Gather {
 		// Not right over a drop into the dark: the block under it must be solid, or it's a cave ceiling.
 		BlockState below = world.getBlockState(p.down());
 		return exposed && !below.isAir() && below.getFluidState().isEmpty();
+	}
+
+	/** Blocks it may pillar up with, to climb out of anywhere it can't walk out of. */
+	private static boolean pillarBlock(ItemStack st, Plan plan) {
+		return st.isOf(plan.filler.asItem()) || st.isOf(Items.DIRT) || st.isOf(Items.COBBLESTONE) || st.isOf(Items.NETHERRACK)
+				|| st.isOf(Items.COBBLED_DEEPSLATE) || st.isOf(Items.ANDESITE) || st.isOf(Items.DIORITE) || st.isOf(Items.GRANITE);
+	}
+
+	private static int pillarSlot(PlayerInventory inv, Plan plan) {
+		for (int i = 0; i < PlayerInventory.MAIN_SIZE; i++) if (pillarBlock(inv.getStack(i), plan)) return i;
+		return -1;
+	}
+
+	/** Plans a walk; it may pillar up (outside the art) when there's no other way. */
+	private static boolean walkPlan(MinecraftClient client, ClientPlayerEntity player, ClientWorld world, Plan plan,
+			java.util.function.Predicate<BlockPos> goal, int[] bounds, BlockPos aim) {
+		walker.placeUnder = cell -> {
+			int slot = pillarSlot(player.getInventory(), plan);
+			BlockPos below = cell.down();
+			if (slot < 0 || !BlockPalette.solid(world.getBlockState(below)) || Builder.opensScreen(world, below)) return false;
+			Builder.select(client, player, slot);
+			client.interactionManager.interactBlock(player, Hand.MAIN_HAND,
+					new net.minecraft.util.hit.BlockHitResult(Vec3d.ofCenter(below).add(0, 0.5, 0), Direction.UP, below, false));
+			player.swingHand(Hand.MAIN_HAND);
+			return true;
+		};
+		boolean canPillar = pillarSlot(player.getInventory(), plan) >= 0;
+		walker.aim = aim;
+		boolean ok = walker.plan(world, player, goal, bounds, canPillar ? cell -> !plan.inColumns(cell.getX(), cell.getZ()) : null, null);
+		walker.aim = null;
+		return ok;
 	}
 
 	private static void go(MinecraftClient client, ClientPlayerEntity player, ClientWorld world, Plan plan) {
@@ -263,9 +347,9 @@ final class Gather {
 			BlockPos feet = Walker.feet(player);
 			int[] bounds = {Math.min(feet.getX(), t.getX()) - 12, Math.min(feet.getY(), t.getY()) - 8, Math.min(feet.getZ(), t.getZ()) - 12,
 					Math.max(feet.getX(), t.getX()) + 12, Math.max(feet.getY(), t.getY()) + 8, Math.max(feet.getZ(), t.getZ()) + 12};
-			if (!walker.plan(world, player, f -> !f.down().equals(t) && !f.equals(t) && !f.up().equals(t)
+			if (!walkPlan(client, player, world, plan, f -> !f.down().equals(t) && !f.equals(t) && !f.up().equals(t)
 					&& new Vec3d(f.getX() + 0.5, f.getY() + 1.62, f.getZ() + 0.5).squaredDistanceTo(Vec3d.ofCenter(t)) <= w * w
-					&& !plan.inColumns(f.getX(), f.getZ()), bounds)) {
+					&& !plan.inColumns(f.getX(), f.getZ()), bounds, t)) {
 				skip.add(target);
 				to(Step.FIND);
 				return;
@@ -400,8 +484,8 @@ final class Gather {
 			int[] bounds = {Math.min(feet.getX(), sx) - 10, Math.min(feet.getY(), plan.y0) - 10, Math.min(feet.getZ(), sz) - 10,
 					Math.max(feet.getX(), sx) + 10, Math.max(feet.getY(), plan.topY()) + 10, Math.max(feet.getZ(), sz) + 10};
 			int fx = sx, fz = sz;
-			if (!walker.plan(world, player, f -> last ? plan.inColumns(f.getX(), f.getZ()) || Math.abs(f.getX() - fx) + Math.abs(f.getZ() - fz) <= 2
-					: Math.abs(f.getX() - fx) + Math.abs(f.getZ() - fz) <= 6, bounds)) {
+			if (!walkPlan(client, player, world, plan, f -> last ? plan.inColumns(f.getX(), f.getZ()) || Math.abs(f.getX() - fx) + Math.abs(f.getZ() - fz) <= 2
+					: Math.abs(f.getX() - fx) + Math.abs(f.getZ() - fz) <= 6, bounds, new BlockPos(fx, plan.y0, fz))) {
 				Builder.debug("gather: no way back from {}", feet);
 			}
 		}

@@ -13,6 +13,8 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
 
+import net.minecraft.util.math.BlockPos;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -119,9 +121,18 @@ final class PaletteScreen extends Screen {
 	 * Silk Touch, if a Silk Touch tool is carried); colours with neither are left out.
 	 */
 	private void useGatherable() {
-		Project p = art.project;
-		boolean silk = client.player != null && Gather.hasSilk(client.player.getInventory());
-		for (int id : ids) {
+		Plan plan = Mapsmith.plan();
+		BlockPos at = plan != null ? new BlockPos(plan.x0 + plan.width() / 2, plan.y0, plan.z0 + plan.height() / 2)
+				: client.player != null ? client.player.getBlockPos() : BlockPos.ORIGIN;
+		gatherable(art.project, carried, client.player != null && Gather.hasSilk(client.player.getInventory()),
+				client.world == null ? Map.of() : Gather.available(client.world, at));
+		changed();
+	}
+
+	/** The palette for {@code p} that the builder can get by itself (see the button's tooltip). */
+	static void gatherable(Project p, Map<net.minecraft.item.Item, Long> carried, boolean silk, Map<Block, Integer> available) {
+		for (int id = 1; id < MapPalette.COLORS; id++) {
+			if (id == MapPalette.WATER || BlockPalette.candidates(id).isEmpty()) continue;
 			Block best = null;
 			long most = 0;
 			for (Block c : BlockPalette.candidates(id)) {
@@ -135,14 +146,13 @@ final class PaletteScreen extends Screen {
 			if (best == null) {
 				// Candidates come best first: the first that can be mined and doesn't fall.
 				for (Block c : BlockPalette.candidates(id)) {
-					if (!Gather.gatherable(c, silk)) continue;
+					if (!Gather.gatherableHere(c, silk, available)) continue;
 					if (best == null || BlockPalette.needsBelow(best) && !BlockPalette.needsBelow(c)) best = c;
 					if (!BlockPalette.needsBelow(best)) break;
 				}
 			}
 			p.blocks.put(id, best == null ? "" : BlockPalette.id(best));
 		}
-		changed();
 	}
 
 	private void changed() {

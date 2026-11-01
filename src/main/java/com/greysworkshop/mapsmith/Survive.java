@@ -45,6 +45,54 @@ final class Survive {
 		return true;
 	}
 
+	private static java.util.Set<net.minecraft.item.Item> needed = java.util.Set.of();
+	private static int neededAt = -1000;
+
+	/**
+	 * With the inventory nearly full, throws out a stack the art doesn't need (dirt and seeds from clearing the
+	 * ground, say), so building and gathering can go on. Never tools, food, maps, shulker boxes, or a block the art
+	 * still needs.
+	 */
+	static void tossJunk(MinecraftClient client, Plan plan, int tick) {
+		ClientPlayerEntity player = client.player;
+		if (player == null || player.getAbilities().creativeMode || player.currentScreenHandler != player.playerScreenHandler) return;
+		PlayerInventory inv = player.getInventory();
+		int free = 0;
+		for (int i = 0; i < PlayerInventory.MAIN_SIZE; i++) if (inv.getStack(i).isEmpty()) free++;
+		if (free > 1) return;
+		if (tick - neededAt > 200) {
+			java.util.Set<net.minecraft.item.Item> n = new java.util.HashSet<>();
+			for (net.minecraft.block.Block b : Builder.remaining(plan, client.world).keySet()) n.add(b.asItem());
+			n.add(plan.filler.asItem());
+			needed = n;
+			neededAt = tick;
+		}
+		int worst = -1;
+		for (int i = 0; i < PlayerInventory.MAIN_SIZE; i++) {
+			ItemStack st = inv.getStack(i);
+			if (st.isEmpty() || i == inv.getSelectedSlot() || keep(st)) continue;
+			if (worst < 0 || st.getCount() > inv.getStack(worst).getCount()) worst = i;
+		}
+		if (worst < 0) return;
+		Builder.debug("throwing away {} (inventory full)", inv.getStack(worst));
+		client.interactionManager.clickSlot(player.playerScreenHandler.syncId, worst < 9 ? 36 + worst : worst, 1,
+				net.minecraft.screen.slot.SlotActionType.THROW, player);
+	}
+
+	private static boolean keep(ItemStack st) {
+		if (st.isDamageable() || st.get(DataComponentTypes.FOOD) != null && !bad(st)) return true;
+		if (st.isOf(Items.FILLED_MAP) || st.isOf(Items.MAP) || st.isOf(Items.SHEARS) || st.isOf(Items.EXPERIENCE_BOTTLE)) return true;
+		if (st.getItem() instanceof net.minecraft.item.BlockItem bi) {
+			if (bi.getBlock() instanceof net.minecraft.block.ShulkerBoxBlock || bi.getBlock() instanceof net.minecraft.block.EnderChestBlock) return true;
+			return needed.contains(st.getItem());
+		}
+		// Anything else valuable stays; the common junk of digging goes.
+		return !(st.isOf(Items.WHEAT_SEEDS) || st.isOf(Items.FLINT) || st.isOf(Items.STICK) || st.isOf(Items.CLAY_BALL)
+				|| st.isOf(Items.SNOWBALL) || st.isOf(Items.GLOWSTONE_DUST) || st.isOf(Items.MELON_SLICE) || st.isOf(Items.STRING)
+				|| st.isOf(Items.ROTTEN_FLESH) || st.isOf(Items.BONE) || st.isOf(Items.ARROW) || st.isOf(Items.SPIDER_EYE)
+				|| st.isOf(Items.GUNPOWDER));
+	}
+
 	static void cancel(MinecraftClient client) {
 		if (eatingTicks > 0) client.options.useKey.setPressed(false);
 		eatingTicks = 0;

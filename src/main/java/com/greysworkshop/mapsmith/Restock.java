@@ -422,7 +422,8 @@ final class Restock {
 	/** Chests, barrels, placed shulker boxes and ender chests near the art. */
 	private static List<BlockPos> containers(ClientWorld world, Plan plan) {
 		List<BlockPos> out = new ArrayList<>();
-		int margin = 32;
+		// Supply chests by the art; not every chest in the world (villages, mineshafts).
+		int margin = 16;
 		int minX = plan.x0 - margin, maxX = plan.x0 + plan.width() + margin, minZ = plan.z0 - margin, maxZ = plan.z0 + plan.height() + margin;
 		boolean ender = false;
 		for (int cx = minX >> 4; cx <= maxX >> 4; cx++) {
@@ -431,6 +432,7 @@ final class Restock {
 				if (chunk == null) continue;
 				for (BlockPos p : chunk.getBlockEntityPositions()) {
 					if (p.getX() < minX || p.getX() > maxX || p.getZ() < minZ || p.getZ() > maxZ) continue;
+					if (p.getY() < plan.y0 - 8 || p.getY() > plan.topY() + 8) continue;
 					BlockState s = world.getBlockState(p);
 					Block b = s.getBlock();
 					if (b instanceof EnderChestBlock) {

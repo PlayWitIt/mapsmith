@@ -89,6 +89,15 @@ final class Walker {
 	 * As above; with {@code tower} (null for none), it may also pillar up: jump and place a block under itself, in cells
 	 * {@code tower} allows. That's how it reaches blocks higher than anything it can walk up to.
 	 */
+	/** Where the goal roughly is, to search towards it first (far goals); null to search evenly. */
+	BlockPos aim;
+
+	private double h(BlockPos p) {
+		if (aim == null) return 0;
+		double dx = p.getX() - aim.getX(), dy = p.getY() - aim.getY(), dz = p.getZ() - aim.getZ();
+		return Math.sqrt(dx * dx + dy * dy + dz * dz);
+	}
+
 	boolean plan(ClientWorld world, ClientPlayerEntity player, Predicate<BlockPos> goal, int[] bounds, Predicate<BlockPos> tower,
 			Predicate<BlockPos> dig) {
 		flyTo = null;
@@ -124,7 +133,7 @@ final class Walker {
 				if (g < best.getOrDefault(down, Double.MAX_VALUE)) {
 					best.put(down, g);
 					from.put(down, n.pos);
-					open.add(new Node(down, g, g));
+					open.add(new Node(down, g, g + h(down)));
 				}
 			}
 			// Pillar up one: the cell we're in gets a block, we stand on it.
@@ -136,7 +145,7 @@ final class Walker {
 					best.put(up, g);
 					from.put(up, n.pos);
 					raised.add(up);
-					open.add(new Node(up, g, g));
+					open.add(new Node(up, g, g + h(up)));
 				}
 			}
 			for (int dx = -1; dx <= 1; dx++) {
@@ -154,7 +163,7 @@ final class Walker {
 						if (g < best.getOrDefault(next, Double.MAX_VALUE)) {
 							best.put(next, g);
 							from.put(next, n.pos);
-							open.add(new Node(next, g, g));
+							open.add(new Node(next, g, g + h(next)));
 						}
 						break;
 					}

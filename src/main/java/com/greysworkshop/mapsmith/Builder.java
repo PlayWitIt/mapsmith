@@ -143,6 +143,18 @@ final class Builder {
 		};
 	}
 
+	private static int screenTicks;
+
+	/** Clicking this block would open something (a chest, a crafting table, a door…) instead of placing against it. */
+	static boolean opensScreen(ClientWorld world, BlockPos pos) {
+		BlockState s = world.getBlockState(pos);
+		return s.hasBlockEntity() || s.createScreenHandlerFactory(world, pos) != null || s.getBlock() instanceof net.minecraft.block.CraftingTableBlock
+				|| s.getBlock() instanceof net.minecraft.block.DoorBlock || s.getBlock() instanceof net.minecraft.block.TrapdoorBlock
+				|| s.getBlock() instanceof net.minecraft.block.FenceGateBlock || s.getBlock() instanceof net.minecraft.block.BedBlock
+				|| s.getBlock() instanceof net.minecraft.block.AnvilBlock || s.getBlock() instanceof net.minecraft.block.ButtonBlock
+				|| s.getBlock() instanceof net.minecraft.block.LeverBlock || s.getBlock() instanceof net.minecraft.block.NoteBlock;
+	}
+
 	static Block blockFor(Plan plan, BlockPos pos) {
 		Block b = plan.blockToPlace(pos.getX(), pos.getY(), pos.getZ());
 		return b != null ? b : plan.filler;
@@ -160,6 +172,7 @@ final class Builder {
 			stop(client, State.OFF, Text.translatable("mapsmith.builder.no_plan"));
 			return;
 		}
+		if (tick % 10 == 0) Survive.tossJunk(client, plan, tick);
 		if (Restock.active()) {
 			if (player.getHealth() < 6 && !player.getAbilities().invulnerable) {
 				Restock.forget();
@@ -198,8 +211,16 @@ final class Builder {
 		}
 		if (client.currentScreen != null) {
 			walker.stop(client);
+			// A container it opened by accident (clicking a block to place against): close it and carry on.
+			if (client.currentScreen instanceof net.minecraft.client.gui.screen.ingame.HandledScreen<?>
+					&& player.currentScreenHandler != player.playerScreenHandler && ++screenTicks > 40) {
+				debug("closing a screen that was left open: {}", client.currentScreen.getClass().getSimpleName());
+				player.closeHandledScreen();
+				screenTicks = 0;
+			}
 			return;
 		}
+		screenTicks = 0;
 		if (player.getHealth() < 6 && !player.getAbilities().invulnerable) {
 			stop(client, State.PAUSED, Text.translatable("mapsmith.builder.low_health").formatted(Formatting.RED));
 			return;
@@ -365,7 +386,7 @@ final class Builder {
 		for (Direction d : new Direction[] {Direction.DOWN, Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST, Direction.UP}) {
 			BlockPos against = pos.offset(d);
 			BlockState there = world.getBlockState(against);
-			if (!BlockPalette.solid(there) || there.getOutlineShape(world, against).isEmpty()) continue;
+			if (!BlockPalette.solid(there) || there.getOutlineShape(world, against).isEmpty() || opensScreen(world, against)) continue;
 			Direction side = d.getOpposite();
 			Vec3d hit = Vec3d.ofCenter(against).add(Vec3d.of(side.getVector()).multiply(0.5));
 			if (eye.squaredDistanceTo(hit) > range * range) continue;
@@ -409,7 +430,7 @@ final class Builder {
 	private static boolean placeFiller(MinecraftClient client, ClientPlayerEntity player, ClientWorld world, Plan plan, BlockPos cell) {
 		int slot = find(player.getInventory(), plan.filler.asItem());
 		BlockPos below = cell.down();
-		if (slot < 0 || !BlockPalette.solid(world.getBlockState(below))) {
+		if (slot < 0 || !BlockPalette.solid(world.getBlockState(below)) || opensScreen(world, below)) {
 			debug("can't pillar up at {}: {}", cell, slot < 0 ? "no " + plan.filler : "nothing under it (" + world.getBlockState(below) + ")");
 			return false;
 		}
