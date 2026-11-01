@@ -57,6 +57,7 @@ final class PaletteScreen extends Screen {
 			changed();
 		}).tooltip(Tooltip.of(t("defaults.tip"))).build());
 		buttons.add(ButtonWidget.builder(t("carried"), b -> useCarried()).tooltip(Tooltip.of(t("carried.tip"))).build());
+		buttons.add(ButtonWidget.builder(t("gatherable"), b -> useGatherable()).tooltip(Tooltip.of(t("gatherable.tip"))).build());
 		buttons.add(ButtonWidget.builder(t("no_falling"), b -> {
 			for (int id : ids) {
 				Block cur = p.block(id);
@@ -106,6 +107,37 @@ final class PaletteScreen extends Screen {
 				if (n > most) {
 					most = n;
 					best = c;
+				}
+			}
+			p.blocks.put(id, best == null ? "" : BlockPalette.id(best));
+		}
+		changed();
+	}
+
+	/**
+	 * Each colour gets a block the builder can get by itself: one already carried, else one it can mine nearby (with
+	 * Silk Touch, if a Silk Touch tool is carried); colours with neither are left out.
+	 */
+	private void useGatherable() {
+		Project p = art.project;
+		boolean silk = client.player != null && Gather.hasSilk(client.player.getInventory());
+		for (int id : ids) {
+			Block best = null;
+			long most = 0;
+			for (Block c : BlockPalette.candidates(id)) {
+				if (c instanceof net.minecraft.block.CarpetBlock && !p.flat()) continue;
+				long n = Materials.have(carried, c);
+				if (n > most) {
+					most = n;
+					best = c;
+				}
+			}
+			if (best == null) {
+				// Candidates come best first: the first that can be mined and doesn't fall.
+				for (Block c : BlockPalette.candidates(id)) {
+					if (!Gather.gatherable(c, silk)) continue;
+					if (best == null || BlockPalette.needsBelow(best) && !BlockPalette.needsBelow(c)) best = c;
+					if (!BlockPalette.needsBelow(best)) break;
 				}
 			}
 			p.blocks.put(id, best == null ? "" : BlockPalette.id(best));

@@ -12,6 +12,7 @@ import net.minecraft.client.util.ScreenshotRecorder;
 import net.minecraft.component.DataComponentTypes;
 import net.minecraft.component.type.MapIdComponent;
 import net.minecraft.item.Items;
+import net.minecraft.util.math.BlockPos;
 import net.minecraft.item.map.MapState;
 import net.minecraft.nbt.NbtCompound;
 import net.minecraft.nbt.NbtIo;
@@ -33,6 +34,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
+import java.util.List;
 import java.util.Map;
 import java.util.stream.Stream;
 
@@ -349,12 +351,35 @@ final class SelfTest {
 				}
 			}
 			need.merge(plan.filler, 8, Integer::sum);
-			withheld = need.entrySet().stream().filter(e -> e.getKey() != plan.filler).max(Map.Entry.comparingByValue()).map(Map.Entry::getKey).orElse(null);
+			// The most-used block is only in a chest near the art, the next in a shulker box it carries (both must be
+			// fetched hands free), and the least-used nowhere (it must pause and say so).
+			List<Block> kinds = need.entrySet().stream().filter(e -> e.getKey() != plan.filler)
+					.sorted(Map.Entry.<Block, Integer>comparingByValue().reversed()).map(Map.Entry::getKey).toList();
+			inChest = kinds.get(0);
+			inBox = kinds.get(1);
+			withheld = kinds.get(kinds.size() - 1);
 			for (Map.Entry<Block, Integer> e : need.entrySet()) {
-				if (e.getKey() == withheld) continue;
+				if (e.getKey() == withheld || e.getKey() == inChest || e.getKey() == inBox) continue;
 				command(client, "give @p " + Registries.ITEM.getId(e.getKey().asItem()) + " " + (e.getValue() + 4));
 			}
 			withheldCount = need.getOrDefault(withheld, 0) + 4;
+			chestCount = need.get(inChest) + 4;
+			command(client, "setblock 60 -60 -58 minecraft:chest");
+			String chestId = Registries.ITEM.getId(inChest.asItem()).toString();
+			for (int i = 0, left = chestCount; left > 0; i++, left -= 64) {
+				command(client, "item replace block 60 -60 -58 container." + i + " with " + chestId + " " + Math.min(64, left));
+			}
+			// Something it doesn't need, to leave alone.
+			command(client, "item replace block 60 -60 -58 container.20 with minecraft:diamond 3");
+			String boxId = Registries.ITEM.getId(inBox.asItem()).toString();
+			int boxCount = need.get(inBox) + 4;
+			StringBuilder box = new StringBuilder("give @p minecraft:red_shulker_box[container=[");
+			for (int i = 0, left = boxCount; left > 0; i++, left -= 64) {
+				if (i > 0) box.append(',');
+				box.append("{slot:").append(i).append(",item:{id:\"").append(boxId).append("\",count:").append(Math.min(64, left)).append("}}");
+			}
+			command(client, box.append("]] 1").toString());
+			log("in the chest: " + inChest + " x" + chestCount + "; in the box: " + inBox + " x" + boxCount);
 			command(client, "give @p minecraft:diamond_pickaxe");
 			command(client, "give @p minecraft:diamond_shovel");
 			// A wrong block to fix (pixel 2,2), a hole in the ground under pixel 6,4, grass in the way at pixel 4,6.
@@ -372,7 +397,8 @@ final class SelfTest {
 	}
 
 	private static boolean refilled;
-	private static int withheldCount;
+	private static int withheldCount, chestCount;
+	private static Block inChest, inBox;
 
 	private static void survivalBuild(MinecraftClient client, int since) {
 		if (since % 200 == 0) log("survival: " + Builder.state + " placed " + Builder.placed + " broken " + Builder.broken + " at "
@@ -391,10 +417,23 @@ final class SelfTest {
 		if (refilled && since > 20 && Builder.state != Builder.State.RUNNING) {
 			check("survival: finishes the region (" + Builder.status.getString() + ")", Builder.state == Builder.State.DONE);
 			checkRegion(client);
-			log("block at the wrong-block spot: " + client.world.getBlockState(new net.minecraft.util.math.BlockPos(66, -60, -62)));
+			log("block at the wrong-block spot: " + client.world.getBlockState(new BlockPos(66, -60, -62)));
 			double walked = Math.hypot(client.player.getX() - startX, client.player.getZ() - startZ);
 			check("survival: walked to do it (" + String.format("%.1f", walked) + " blocks from the start)", walked > 3);
 			check("survival: broke the wrong block (" + Builder.broken + " broken)", Builder.broken >= 1);
+			int[] after = server(client, sv -> {
+				var p = sv.getPlayerManager().getPlayerList().get(0);
+				int chest = 0, boxes = 0, placedBoxes = 0;
+				if (sv.getOverworld().getBlockEntity(new BlockPos(60, -60, -58)) instanceof net.minecraft.inventory.Inventory inv) {
+					for (int i = 0; i < inv.size(); i++) if (inv.getStack(i).isOf(inChest.asItem())) chest += inv.getStack(i).getCount();
+				}
+				for (int i = 0; i < p.getInventory().size(); i++) if (p.getInventory().getStack(i).isOf(Items.RED_SHULKER_BOX)) boxes++;
+				for (BlockPos q : BlockPos.iterate(40, -62, -90, 100, -55, -30)) if (sv.getOverworld().getBlockState(q).isOf(net.minecraft.block.Blocks.RED_SHULKER_BOX)) placedBoxes++;
+				return new int[] {chest, boxes, placedBoxes};
+			});
+			check("survival: fetched " + inChest.getName().getString() + " from the chest by itself (" + after[0] + " of " + chestCount + " left)", after[0] < chestCount);
+			check("survival: emptied the carried shulker box and picked it back up (" + after[1] + " carried, " + after[2] + " left in the world)",
+					after[1] == 1 && after[2] == 0);
 			screenshot(client, "8_survival_done");
 			next("stairs_setup");
 		}
@@ -533,6 +572,16 @@ final class SelfTest {
 	private static void fail(MinecraftClient client, String why) {
 		check(why, false);
 		next("finish");
+	}
+
+	private static <T> T server(MinecraftClient client, java.util.function.Function<MinecraftServer, T> job) {
+		MinecraftServer server = client.getServer();
+		try {
+			return server.submit(() -> job.apply(server)).get();
+		} catch (Exception e) {
+			log("server job failed: " + e);
+			return null;
+		}
 	}
 
 	private static void command(MinecraftClient client, String command) {

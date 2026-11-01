@@ -72,7 +72,7 @@ final class Builder {
 
 	private static final boolean DEBUG = Boolean.getBoolean("mapsmith.debug");
 
-	private static void debug(String what, Object... args) {
+	static void debug(String what, Object... args) {
 		if (DEBUG) Mapsmith.LOGGER.info("[builder] " + what, args);
 	}
 
@@ -97,6 +97,7 @@ final class Builder {
 		state = State.RUNNING;
 		missing.clear();
 		skipNode.clear();
+		Restock.reset();
 		failures = 0;
 		goal = null;
 		cursorLane = cursorPx = cursorNode = 0;
@@ -111,6 +112,9 @@ final class Builder {
 		walker.clear(client);
 		if (breaking != null && client.interactionManager != null) client.interactionManager.cancelBlockBreaking();
 		breaking = null;
+		if (Restock.active()) Restock.forget();
+		Gather.forget(client);
+		Survive.cancel(client);
 		if (to != State.OFF) say(client, why);
 	}
 
@@ -154,6 +158,42 @@ final class Builder {
 		if (player == null || world == null || client.interactionManager == null) return;
 		if (plan == null) {
 			stop(client, State.OFF, Text.translatable("mapsmith.builder.no_plan"));
+			return;
+		}
+		if (Restock.active()) {
+			if (player.getHealth() < 6 && !player.getAbilities().invulnerable) {
+				Restock.forget();
+				if (player.currentScreenHandler != player.playerScreenHandler) player.closeHandledScreen();
+				stop(client, State.PAUSED, Text.translatable("mapsmith.builder.low_health").formatted(Formatting.RED));
+				return;
+			}
+			status = Restock.status();
+			Restock.tick(client, plan);
+			if (!Restock.active() && Restock.failure != null) {
+				// Nothing to fetch: mine it, if it's something that can be mined.
+				if (!(MapsmithConfig.INSTANCE.gather && Gather.begin(client, plan, missing.keySet()))) {
+					stop(client, State.PAUSED, Restock.failure.copy().formatted(Formatting.YELLOW));
+				}
+			}
+			return;
+		}
+		if (Gather.active()) {
+			if (player.getHealth() < 6 && !player.getAbilities().invulnerable) {
+				Gather.forget(client);
+				stop(client, State.PAUSED, Text.translatable("mapsmith.builder.low_health").formatted(Formatting.RED));
+				return;
+			}
+			if (Survive.tick(client)) return;
+			status = Gather.status();
+			Gather.tick(client, plan);
+			if (!Gather.active()) {
+				if (Gather.failure != null) stop(client, State.PAUSED, Gather.failure.copy().formatted(Formatting.YELLOW));
+				else missing.clear();
+			}
+			return;
+		}
+		if (Survive.tick(client)) {
+			walker.stop(client);
 			return;
 		}
 		if (client.currentScreen != null) {
@@ -392,7 +432,7 @@ final class Builder {
 	}
 
 	/** Puts the stack in {@code slot} in hand, swapping it into the hotbar if need be. */
-	private static void select(MinecraftClient client, ClientPlayerEntity player, int slot) {
+	static void select(MinecraftClient client, ClientPlayerEntity player, int slot) {
 		PlayerInventory inv = player.getInventory();
 		if (slot < PlayerInventory.getHotbarSize()) {
 			inv.setSelectedSlot(slot);
@@ -403,7 +443,7 @@ final class Builder {
 		inv.setSelectedSlot(hotbar);
 	}
 
-	private static void look(ClientPlayerEntity player, Vec3d at) {
+	static void look(ClientPlayerEntity player, Vec3d at) {
 		Vec3d d = at.subtract(player.getEyePos());
 		double flat = Math.sqrt(d.x * d.x + d.z * d.z);
 		player.setYaw((float) (MathHelper.atan2(d.z, d.x) * 180 / Math.PI) - 90);
@@ -448,7 +488,7 @@ final class Builder {
 		return true;
 	}
 
-	private static void bestTool(MinecraftClient client, ClientPlayerEntity player, BlockState state) {
+	static void bestTool(MinecraftClient client, ClientPlayerEntity player, BlockState state) {
 		PlayerInventory inv = player.getInventory();
 		int best = -1;
 		float bestSpeed = 1;
@@ -505,6 +545,12 @@ final class Builder {
 		}
 		skipNode.values().removeIf(t -> tick - t > 400);
 		BlockPos target = blockedBySelf != null ? blockedBySelf : nextTarget(plan, world, player);
+		// Out of something a carried shulker box holds: fetch it now, it's right here.
+		if (!player.getAbilities().creativeMode && !missing.isEmpty() && Restock.carriedHas(player, missing.keySet())) {
+			walker.clear(client);
+			goal = null;
+			if (Restock.begin(client, plan, missing.keySet())) return;
+		}
 		if (target == null && !skippedAny) {
 			// Before calling it done, look over all of it again from the start: the server can undo a block after the
 			// strip it's in was passed.
@@ -519,7 +565,15 @@ final class Builder {
 		}
 		if (target == null) {
 			if (!missing.isEmpty()) {
-				stop(client, State.PAUSED, Text.translatable("mapsmith.builder.out_of", missingText()).formatted(Formatting.YELLOW));
+				// Everything else is done: get more from the chests near the art before giving up.
+				if (!player.getAbilities().creativeMode && (Restock.begin(client, plan, missing.keySet())
+						|| MapsmithConfig.INSTANCE.gather && Gather.begin(client, plan, missing.keySet()))) {
+					walker.clear(client);
+					goal = null;
+					return;
+				}
+				stop(client, State.PAUSED, (Restock.failure != null ? Restock.failure.copy()
+						: Text.translatable("mapsmith.builder.out_of", missingText())).formatted(Formatting.YELLOW));
 			} else if (allLoaded(plan, world)) {
 				stop(client, State.DONE, Text.translatable("mapsmith.builder.done", placed, broken).formatted(Formatting.GREEN));
 			} else {
@@ -670,6 +724,23 @@ final class Builder {
 			}
 		}
 		return true;
+	}
+
+	/** How many of each block the art (or the region being built) still needs placed, in the loaded chunks. */
+	static Map<Block, Integer> remaining(Plan plan, ClientWorld world) {
+		Map<Block, Integer> out = new LinkedHashMap<>();
+		BlockPos.Mutable pos = new BlockPos.Mutable();
+		for (int px = 0; px < plan.width(); px++) {
+			for (int node = 0; node <= plan.height(); node++) {
+				int x = plan.x0 + px, z = plan.z0 + node - 1;
+				if (!inRegion(plan, x, z) || !world.getChunkManager().isChunkLoaded(x >> 4, z >> 4)) continue;
+				for (int y = plan.y0 - 1; y <= plan.topY(); y++) {
+					pos.set(x, y, z);
+					if (need(plan, world, pos, world.getBlockState(pos)) == Need.PLACE) out.merge(blockFor(plan, pos), 1, Integer::sum);
+				}
+			}
+		}
+		return out;
 	}
 
 	static Text missingText() {

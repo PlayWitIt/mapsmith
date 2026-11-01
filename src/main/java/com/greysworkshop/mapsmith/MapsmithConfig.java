@@ -23,6 +23,8 @@ final class MapsmithConfig {
 	boolean fixMistakes = true;
 	/** Walk (or in creative, fly) from one part of the art to the next. */
 	boolean autoWalk = true;
+	/** In survival, mine blocks the art needs from the world nearby when there are none to fetch. */
+	boolean gather = true;
 	/** In creative, fly instead of walking. */
 	boolean fly = true;
 	/** Show the blocks still to place, in the world. */
