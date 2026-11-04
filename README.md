@@ -13,6 +13,8 @@ By **PlayWit Creations**.
 2. Put `mapsmith-<version>+1.21.11.jar` in your `.minecraft/mods` folder.
 3. In game, press **U** to open the studio.
 
+Mapsmith **updates itself**: once a session it checks GitHub for the latest release and, if there is one, downloads it in the background and puts it in when you close the game (you can turn this off in Settings). No Modrinth wait, nothing to click.
+
 ## Making art
 1. **Pick a picture.** In the studio, click **Open a picture…**, drop a picture onto the game window, or put pictures
    in `.minecraft/mapsmith/pictures`. PNG, JPEG, GIF, BMP and TGA all work.

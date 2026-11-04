@@ -37,6 +37,7 @@ public final class Mapsmith implements ClientModInitializer {
 	@Override
 	public void onInitializeClient() {
 		MapsmithConfig.load();
+		try { UpdateCheck.init(); } catch (RuntimeException e) { LOGGER.debug("Updater init: {}", e.toString()); }
 		KeyBinding.Category category = KeyBinding.Category.create(Identifier.of(MOD_ID, "main"));
 		studioKey = KeyBindingHelper.registerKeyBinding(new KeyBinding("key.mapsmith.studio", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_U, category));
 		buildKey = KeyBindingHelper.registerKeyBinding(new KeyBinding("key.mapsmith.build", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_G, category));
@@ -73,6 +74,7 @@ public final class Mapsmith implements ClientModInitializer {
 
 	private static void tick(MinecraftClient client) {
 		tick++;
+		UpdateCheck.tick(client);
 		while (studioKey.wasPressed()) {
 			if (client.currentScreen == null) client.setScreen(new StudioScreen(null));
 		}

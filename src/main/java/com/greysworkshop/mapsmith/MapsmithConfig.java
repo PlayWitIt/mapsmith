@@ -36,6 +36,15 @@ final class MapsmithConfig {
 	/** The project open last, to open again. */
 	String lastProject = "";
 
+	/** Update by itself from GitHub releases (new versions download in the background, go in when you close the game). */
+	boolean updates = true;
+	/** The version that ran last time, to notice when an update went in. */
+	String lastVersion = "";
+	/** How many starts in a row an update was downloaded but couldn't be put in (helper can't run here). */
+	int updateTries;
+	/** A version you chose to skip. */
+	String skippedVersion = "";
+
 	static void load() {
 		try {
 			if (Files.exists(file)) {
@@ -50,6 +59,8 @@ final class MapsmithConfig {
 		c.creativeSpeed = Math.max(1, Math.min(40, c.creativeSpeed));
 		c.ghostRange = Math.max(4, Math.min(32, c.ghostRange));
 		if (c.lastProject == null) c.lastProject = "";
+		if (c.lastVersion == null) c.lastVersion = "";
+		if (c.skippedVersion == null) c.skippedVersion = "";
 	}
 
 	static void save() {
