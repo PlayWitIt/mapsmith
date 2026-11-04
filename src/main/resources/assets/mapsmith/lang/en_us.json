@@ -141,6 +141,8 @@
 	"mapsmith.settings.grid.tip": "Gold lines on map borders, faint ones on chunk borders, near your feet.",
 	"mapsmith.settings.hud": "Progress at the top left",
 	"mapsmith.settings.hud.tip": "How the art is coming along, what the builder's doing, and how a map you're holding compares.",
+	"mapsmith.settings.updates": "Update by itself",
+	"mapsmith.settings.updates.tip": "New versions download in the background and go in when you close the game. Nothing to click.",
 
 	"mapsmith.palette": "Blocks",
 	"mapsmith.palette.defaults": "Defaults",

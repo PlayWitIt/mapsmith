@@ -50,6 +50,8 @@ final class SettingsScreen extends Screen {
 		y += 24;
 		toggle(x1, y, w, "grid", () -> c.grid, v -> c.grid = v);
 		toggle(x2, y, w, "hud", () -> c.hud, v -> c.hud = v);
+		y += 24;
+		toggle(x1, y, w, "updates", () -> c.updates, v -> c.updates = v);
 		addDrawableChild(ButtonWidget.builder(ScreenTexts.DONE, b -> close()).dimensions(width / 2 - 75, height - 28, 150, 20).build());
 	}
 
