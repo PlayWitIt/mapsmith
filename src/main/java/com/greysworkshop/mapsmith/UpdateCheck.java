@@ -66,7 +66,6 @@ public final class UpdateCheck {
 	private static boolean told;
 	private static boolean armed;
 	/** A newer release that couldn't be installed by itself: shown as a note. */
-	private static volatile Release noteFor;
 	private static int ticksInWorld;
 
 	/** The version running, e.g. "1.5.0" (without the "+1.21.11"). */
@@ -147,23 +146,15 @@ public final class UpdateCheck {
 				return;
 			}
 		}
-		Release release = noteFor;
-		if (release == null || !started) return;
-		told = true;
-		if (release.version.equals(MapsmithConfig.INSTANCE.skippedVersion)) return;
-		chat(Text.literal(NAME + " " + release.version + " is out (you have " + now + "). ").formatted(Formatting.YELLOW)
-				.append(Text.literal("[Download]").styled(s -> s.withColor(Formatting.AQUA).withUnderline(true)
-						.withClickEvent(new ClickEvent.OpenUrl(URI.create(release.page))))));
+		// No nagging: Mapsmith updates itself silently when it can. If it can't (e.g. the jar was placed by hand), it
+		// stays quiet rather than asking you to confirm or download — the next version just comes in when it's able to.
 	}
 
 	private static void check() {
 		Release release = latest(REPO, minecraftVersion());
 		if (release == null || !newer(release.version, current())) return;
 		Path jar = ownJar();
-		if (jar == null) {
-			noteFor = release;
-			return;
-		}
+		if (jar == null) return;
 		Path target = jar.resolveSibling(release.jarName);
 		Path update = jar.resolveSibling(release.jarName + UPDATE_SUFFIX);
 		if (armed) return;
@@ -173,7 +164,6 @@ public final class UpdateCheck {
 				// Twice in a row means it can't on this computer: say so, with a download link, rather than keep quiet.
 				MapsmithConfig.INSTANCE.updateTries++;
 				MapsmithConfig.save();
-				if (MapsmithConfig.INSTANCE.updateTries >= 2) noteFor = release;
 			} else {
 				download(release, update, MOD_ID);
 			}
@@ -181,7 +171,6 @@ public final class UpdateCheck {
 			Mapsmith.LOGGER.info("{} {} is downloaded and goes in when the game closes", NAME, release.version);
 		} catch (Exception e) {
 			Mapsmith.LOGGER.warn("Couldn't update {} by itself: {}", NAME, e.toString());
-			noteFor = release;
 		}
 	}
 
