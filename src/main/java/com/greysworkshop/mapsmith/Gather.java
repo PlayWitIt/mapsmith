@@ -42,7 +42,7 @@ import java.util.Set;
 final class Gather {
 	private Gather() {}
 
-	enum Step { IDLE, FIND, GO, MINE, COLLECT, RETURN }
+	enum Step { IDLE, FIND, GO, MINE, COLLECT, RETURN, DIG }
 
 	static Step step = Step.IDLE;
 	static Text failure;
@@ -61,7 +61,21 @@ final class Gather {
 		return step != Step.IDLE;
 	}
 
+	/** Stands still for a moment (healing, say), keeping what it was doing. */
+	static void pause(MinecraftClient client) {
+		if (step != Step.IDLE) walker.stop(client);
+		unnudge(client);
+	}
+
+	private static void unnudge(MinecraftClient client) {
+		if (!nudging) return;
+		client.options.forwardKey.setPressed(false);
+		client.options.sneakKey.setPressed(false);
+		nudging = false;
+	}
+
 	static void forget(MinecraftClient client) {
+		unnudge(client);
 		if (step != Step.IDLE) {
 			walker.clear(client);
 			if (client.interactionManager != null) client.interactionManager.cancelBlockBreaking();
@@ -184,7 +198,9 @@ final class Gather {
 		}
 		failure = null;
 		gotAny = false;
+		digging = false;
 		skip.clear();
+		lost.clear();
 		if (want.isEmpty()) return false;
 		Builder.debug("gather: want {}", want);
 		to(Step.FIND);
@@ -192,6 +208,10 @@ final class Gather {
 	}
 
 	private static void to(Step s) {
+		unnudge(MinecraftClient.getInstance());
+		var player = MinecraftClient.getInstance().player;
+		Builder.debug("gather: {} -> {} (target {} for {}, mined {}, want {}, at {})", step, s, target, targetDrop, mined, want,
+				player == null ? "?" : player.getBlockPos().toShortString());
 		step = s;
 		ticks = 0;
 		tries = 0;
@@ -209,6 +229,7 @@ final class Gather {
 			case MINE -> mine(client, player, world, plan);
 			case COLLECT -> collect(client, player, world);
 			case RETURN -> back(client, player, world, plan);
+			case DIG -> dig(client, player, world, plan);
 			default -> {}
 		}
 	}
@@ -248,7 +269,7 @@ final class Gather {
 						p.set(x, y, z);
 						BlockState s = world.getBlockState(p);
 						if (!from.containsKey(s.getBlock()) || skip.contains(p)) continue;
-						if (!safe(world, p)) continue;
+						if (!safe(world, p) || !collectable(world, p)) continue;
 						// Never digging down: at most one below our feet, from the top, and not right beside us.
 						if (y < feet.getY() - 1) continue;
 						if (y == feet.getY() - 1 && (!world.getBlockState(p.up()).isAir() || Math.abs(dx) <= 1 && Math.abs(dz) <= 1)) continue;
@@ -261,14 +282,28 @@ final class Gather {
 				}
 			}
 		}
+		if (found == null && digging) {
+			// On the way down: nothing showing yet, so another step.
+			to(Step.DIG);
+			return;
+		}
 		if (found == null && ++findTries < 4) {
 			// The world round about may still be loading.
 			ticks = -40;
 			return;
 		}
-		if (found == null) {
-			Builder.debug("gather: nothing to mine for {} within {}", want.keySet(), RANGE);
+		if (found == null && (digging || want.keySet().stream().noneMatch(Gather::underground))) {
+			// Dug for it already, or it's not something that's underground everywhere (sandstone is only under deserts).
+			Builder.debug("gather: nothing showing for {} within {}, and nothing to dig for", want.keySet(), RANGE);
 			to(Step.RETURN);
+			return;
+		}
+		if (found == null) {
+			// Nothing showing anywhere near: dig down to it, a staircase at a time (stone is under everything).
+			want.keySet().removeIf(i -> !underground(i));
+			Builder.debug("gather: nothing showing for {} within {}: digging down", want.keySet(), RANGE);
+			findTries = 0;
+			startDig(plan, player);
 			return;
 		}
 		findTries = 0;
@@ -291,6 +326,16 @@ final class Gather {
 		// Not right over a drop into the dark: the block under it must be solid, or it's a cave ceiling.
 		BlockState below = world.getBlockState(p.down());
 		return exposed && !below.isAir() && below.getFluidState().isEmpty();
+	}
+
+	/**
+	 * Whether what drops from {@code p} can be picked up: there's somewhere to stand level with it, right beside it (or
+	 * in its place, once it's gone). From anywhere else, it's out of reach of picking up.
+	 */
+	private static boolean collectable(ClientWorld world, BlockPos p) {
+		if (Walker.passable(world, p.up()) && !world.getBlockState(p.down()).getCollisionShape(world, p.down()).isEmpty()) return true;
+		for (Direction d : Direction.Type.HORIZONTAL) if (Walker.standable(world, p.offset(d))) return true;
+		return false;
 	}
 
 	/** Blocks it may pillar up with, to climb out of anywhere it can't walk out of. */
@@ -330,7 +375,9 @@ final class Gather {
 			to(Step.FIND);
 			return;
 		}
-		if (player.getEyePos().squaredDistanceTo(Vec3d.ofCenter(target)) <= r * r && player.isOnGround()) {
+		// In reach, and level with it (or at most one below): what drops has to be picked up from there.
+		if (player.getEyePos().squaredDistanceTo(Vec3d.ofCenter(target)) <= r * r && player.isOnGround()
+				&& Walker.feet(player).getY() >= target.getY() - 1) {
 			walker.stop(client);
 			to(Step.MINE);
 			return;
@@ -347,7 +394,7 @@ final class Gather {
 			BlockPos feet = Walker.feet(player);
 			int[] bounds = {Math.min(feet.getX(), t.getX()) - 12, Math.min(feet.getY(), t.getY()) - 8, Math.min(feet.getZ(), t.getZ()) - 12,
 					Math.max(feet.getX(), t.getX()) + 12, Math.max(feet.getY(), t.getY()) + 8, Math.max(feet.getZ(), t.getZ()) + 12};
-			if (!walkPlan(client, player, world, plan, f -> !f.down().equals(t) && !f.equals(t) && !f.up().equals(t)
+			if (!walkPlan(client, player, world, plan, f -> !f.down().equals(t) && !f.equals(t) && !f.up().equals(t) && f.getY() >= t.getY() - 1
 					&& new Vec3d(f.getX() + 0.5, f.getY() + 1.62, f.getZ() + 0.5).squaredDistanceTo(Vec3d.ofCenter(t)) <= w * w
 					&& !plan.inColumns(f.getX(), f.getZ()), bounds, t)) {
 				skip.add(target);
@@ -428,10 +475,34 @@ final class Gather {
 		return true;
 	}
 
+	private static boolean nudging;
+
+	/** Nothing in the way of walking straight from one spot to another (at the lower one's height, and head height). */
+	private static boolean straightTo(ClientWorld world, Vec3d a, Vec3d b) {
+		double y = Math.min(a.y, b.y);
+		int steps = (int) Math.ceil(Math.hypot(b.x - a.x, b.z - a.z) * 4) + 1;
+		BlockPos.Mutable p = new BlockPos.Mutable();
+		BlockPos itsCell = BlockPos.ofFloored(b);
+		for (int i = 1; i <= steps; i++) {
+			double t = (double) i / steps;
+			// Up against the side of the cell it's in is near enough: a block over it there doesn't matter.
+			if (BlockPos.ofFloored(a.x + (b.x - a.x) * t, b.y, a.z + (b.z - a.z) * t).equals(itsCell)) break;
+			double x = a.x + (b.x - a.x) * t, z = a.z + (b.z - a.z) * t;
+			for (double oy : new double[] {0.1, 1.0}) {
+				p.set(MathHelper.floor(x), MathHelper.floor(Math.max(y, i < steps / 2 ? a.y : b.y) + oy), MathHelper.floor(z));
+				if (!Walker.passable(world, p)) return false;
+			}
+		}
+		return true;
+	}
+	/** Drops it couldn't get to: not tried again. */
+	private static final Set<Integer> lost = new HashSet<>();
+
 	private static void collect(MinecraftClient client, ClientPlayerEntity player, ClientWorld world) {
 		collectWait++;
+
 		ItemEntity drop = world.getEntitiesByClass(ItemEntity.class, new Box(target).expand(4, 3, 4), e -> e.getStack().isOf(targetDrop)).stream()
-				.min(java.util.Comparator.comparingDouble(e -> e.squaredDistanceTo(player))).orElse(null);
+				.filter(e -> !lost.contains(e.getId())).min(java.util.Comparator.comparingDouble(e -> e.squaredDistanceTo(player))).orElse(null);
 		if (drop == null) {
 			if (collectWait > 6) {
 				want.computeIfPresent(targetDrop, (k, v) -> v - 1);
@@ -442,25 +513,219 @@ final class Gather {
 			return;
 		}
 		if (collectWait > 120) {
+			lost.add(drop.getId());
+			Builder.debug("gather: gave up picking up {} at {} (age {}, on ground {}), player at {} (feet {}), walker arrived {} moving {}, free slots {}",
+					drop.getStack(), drop.getEntityPos(), drop.getItemAge(), drop.isOnGround(), player.getEntityPos(), Walker.feet(player), walker.arrived(),
+					walker.moving(), free(player.getInventory()));
 			walker.clear(client);
 			to(Step.FIND);
 			return;
 		}
 		if (player.getBoundingBox().expand(1, 0.5, 1).intersects(drop.getBoundingBox())) {
+			unnudge(client);
 			walker.stop(client);
 			return;
 		}
+		// Close, level with it or down in the hole it came out of, and nothing in the way: walk straight at it (stopping
+		// at the right block isn't close enough, from its edge; nor is standing on the edge of the hole).
+		Vec3d to = drop.getEntityPos().subtract(player.getEntityPos());
+		if (Math.hypot(to.x, to.z) < 2.6 && to.y < 0.6 && to.y > -1.6 && (walker.arrived() || nudging)
+				&& straightTo(world, player.getEntityPos(), drop.getEntityPos())) {
+			walker.clear(client);
+			player.setYaw((float) (MathHelper.atan2(to.z, to.x) * 180 / Math.PI) - 90);
+			client.options.forwardKey.setPressed(true);
+			// Not off an edge after it, unless it's down in a hole.
+			client.options.sneakKey.setPressed(to.y > -0.5);
+			nudging = true;
+			return;
+		}
+		unnudge(client);
 		if (walker.arrived() || collectWait % 30 == 1) {
 			BlockPos cell = drop.getBlockPos();
 			BlockPos feet = Walker.feet(player);
-			walker.plan(world, player, f -> Math.abs(f.getX() - cell.getX()) + Math.abs(f.getZ() - cell.getZ()) <= 1 && Math.abs(f.getY() - cell.getY()) <= 1,
+			// Level with it: items are only picked up from half a block below your feet, so not from the edge of the hole
+			// the block came out of.
+			walker.plan(world, player, f -> Math.abs(f.getX() - cell.getX()) + Math.abs(f.getZ() - cell.getZ()) <= 1 && f.getY() == cell.getY(),
 					new int[] {feet.getX() - 8, feet.getY() - 6, feet.getZ() - 8, feet.getX() + 8, feet.getY() + 6, feet.getZ() + 8});
 		}
 		walker.tick(client);
 	}
 
+	// ---- digging down
+
+	/** Under the ground almost anywhere: worth digging down for. */
+	private static boolean underground(Item item) {
+		return item == Items.COBBLESTONE || item == Items.COBBLED_DEEPSLATE || item == Items.DIRT || item == Items.ANDESITE
+				|| item == Items.DIORITE || item == Items.GRANITE || item == Items.TUFF || item == Items.GRAVEL;
+	}
+
+	/** Which way the staircase goes, how many steps so far, and how many times it's had to turn. */
+	private static Direction digDir = Direction.NORTH;
+	private static int digSteps, digTurns;
+	private static boolean digging;
+	private static BlockPos digCell;
+	private static final int MAX_STEPS = 64;
+
+	private static void startDig(Plan plan, ClientPlayerEntity player) {
+		// Away from the art.
+		double dx = player.getX() - (plan.x0 + plan.width() / 2.0), dz = player.getZ() - (plan.z0 + plan.height() / 2.0);
+		digDir = Math.abs(dx) > Math.abs(dz) ? (dx > 0 ? Direction.EAST : Direction.WEST) : (dz > 0 ? Direction.SOUTH : Direction.NORTH);
+		digSteps = 0;
+		digTurns = 0;
+		digging = true;
+		digCell = null;
+		to(Step.DIG);
+	}
+
+	private static void stopDig() {
+		digging = false;
+		digCell = null;
+		to(Step.RETURN);
+	}
+
+	/** Too close to the art to dig: a staircase there would cut into it or the ground beside it. */
+	private static boolean nearArt(Plan plan, BlockPos p) {
+		return p.getX() >= plan.x0 - 6 && p.getX() < plan.x0 + plan.width() + 6 && p.getZ() >= plan.z0 - 7 && p.getZ() < plan.z0 + plan.height() + 6;
+	}
+
+	private static boolean wet(ClientWorld world, BlockPos p) {
+		if (!world.getFluidState(p).isEmpty()) return true;
+		for (Direction d : Direction.values()) {
+			BlockState n = world.getBlockState(p.offset(d));
+			if (!n.getFluidState().isEmpty() || n.isOf(Blocks.FIRE) || n.isOf(Blocks.MAGMA_BLOCK)) return true;
+		}
+		return false;
+	}
+
+	/**
+	 * One staircase step down, away from the art: clears the three blocks ahead (head height, feet, and one down),
+	 * sand or gravel that would fall in first, then steps down. Turns at water, lava, a drop or something it can't
+	 * mine; gives up after too many turns or steps, or near the bottom of the world. Each step it looks again for what
+	 * it wants in the walls.
+	 */
+	private static void dig(MinecraftClient client, ClientPlayerEntity player, ClientWorld world, Plan plan) {
+		BlockPos feet = Walker.feet(player);
+		if (nearArt(plan, feet)) {
+			// Walk out from the art first.
+			if (walker.arrived() || !walker.moving() && ticks % 20 == 1) {
+				if (++tries > 6) {
+					stopDig();
+					return;
+				}
+				int[] bounds = {feet.getX() - 24, feet.getY() - 6, feet.getZ() - 24, feet.getX() + 24, feet.getY() + 6, feet.getZ() + 24};
+				walkPlan(client, player, world, plan, f -> !nearArt(plan, f), bounds, feet.offset(digDir, 12));
+			}
+			if (!walker.tick(client)) walker.clear(client);
+			return;
+		}
+		if (digSteps >= MAX_STEPS || feet.getY() <= world.getBottomY() + 8 || feet.getY() <= 0 && digSteps > 0) {
+			Builder.debug("gather: dug {} steps down to {}, stopping", digSteps, feet);
+			stopDig();
+			return;
+		}
+		if (!player.isOnGround() && !player.isTouchingWater()) return;
+		BlockPos ahead = feet.offset(digDir);
+		BlockPos[] cells = {ahead.up(), ahead, ahead.down()};
+		// Breaking one already: carry on with it.
+		if (digCell != null) {
+			BlockState s = world.getBlockState(digCell);
+			if (s.isAir() || s.isReplaceable() && s.getFluidState().isEmpty()) {
+				client.interactionManager.cancelBlockBreaking();
+				digCell = null;
+			} else {
+				if (++ticks > 400) {
+					client.interactionManager.cancelBlockBreaking();
+					turn("couldn't break " + s);
+					return;
+				}
+				Direction side = Direction.getFacing(player.getEyePos().subtract(Vec3d.ofCenter(digCell)));
+				Builder.look(player, Vec3d.ofCenter(digCell));
+				client.interactionManager.updateBlockBreakingProgress(digCell, side);
+				player.swingHand(Hand.MAIN_HAND);
+				return;
+			}
+		}
+		// Sand or gravel over the top of the way ahead comes down first, while we're not under it.
+		BlockPos over = ahead.up(2);
+		if (world.getBlockState(over).getBlock() instanceof FallingBlock) {
+			if (wet(world, over)) {
+				turn("water over the way");
+				return;
+			}
+			startBreaking(client, player, world, over);
+			return;
+		}
+		for (BlockPos c : cells) {
+			BlockState s = world.getBlockState(c);
+			if (wet(world, c)) {
+				turn("water or lava at " + c.toShortString());
+				return;
+			}
+			if (s.isAir() || s.isReplaceable() || Walker.passable(world, c)) continue;
+			float hardness = s.getHardness(world, c);
+			if (hardness < 0 || hardness > 20) {
+				turn("can't mine " + s.getBlock());
+				return;
+			}
+			startBreaking(client, player, world, c);
+			return;
+		}
+		// Clear: something to stand on below, and not a drop into a cave.
+		BlockPos step = ahead.down();
+		BlockState floor = world.getBlockState(step.down());
+		if (floor.isAir() || !floor.getFluidState().isEmpty() || floor.getCollisionShape(world, step.down()).isEmpty()) {
+			turn("a drop at " + step.down().toShortString());
+			return;
+		}
+		// Step down into it.
+		if (feet.equals(step)) return;
+		walker.plan(world, player, f -> f.equals(step), new int[] {feet.getX() - 2, feet.getY() - 3, feet.getZ() - 2, feet.getX() + 2, feet.getY() + 1, feet.getZ() + 2});
+		if (walker.arrived() && !Walker.feet(player).equals(step)) {
+			walker.clear(client);
+			if (++tries > 40) turn("can't step down");
+			return;
+		}
+		if (!walker.tick(client)) walker.clear(client);
+		if (Walker.feet(player).equals(step)) {
+			walker.clear(client);
+			digSteps++;
+			digTurns = 0;
+			// Anything wanted showing in the walls now?
+			to(Step.FIND);
+		}
+	}
+
+	private static void startBreaking(MinecraftClient client, ClientPlayerEntity player, ClientWorld world, BlockPos c) {
+		walker.stop(client);
+		BlockState s = world.getBlockState(c);
+		Item was = targetDrop;
+		Block b = s.getBlock();
+		// The tool for it: one that keeps the drop if it's something wanted (stone gives cobblestone without Silk Touch).
+		targetDrop = want.keySet().stream().filter(i -> sources(i, hasSilk(player.getInventory())).contains(b)).findFirst().orElse(null);
+		tool(client, player, s);
+		if (targetDrop != null) want.computeIfPresent(targetDrop, (k, v) -> v - 1);
+		targetDrop = was;
+		Direction side = Direction.getFacing(player.getEyePos().subtract(Vec3d.ofCenter(c)));
+		Builder.look(player, Vec3d.ofCenter(c));
+		client.interactionManager.attackBlock(c, side);
+		player.swingHand(Hand.MAIN_HAND);
+		digCell = c.toImmutable();
+		ticks = 0;
+	}
+
+	private static void turn(String why) {
+		Builder.debug("gather: turning the staircase ({})", why);
+		digCell = null;
+		digDir = digDir.rotateYClockwise();
+		if (++digTurns > 3) {
+			Builder.debug("gather: no way down from here");
+			stopDig();
+		}
+	}
+
 	/** Back to the art, so the builder carries on. */
 	private static void back(MinecraftClient client, ClientPlayerEntity player, ClientWorld world, Plan plan) {
+		digging = false;
 		BlockPos feet = Walker.feet(player);
 		if (plan.inColumns(feet.getX(), feet.getZ()) || distanceToArt(plan, player) < 3) {
 			walker.clear(client);
@@ -503,6 +768,7 @@ final class Gather {
 			case GO, MINE -> Text.translatable("mapsmith.gather.mining", Block.getBlockFromItem(targetDrop).getName(), target.getX(), target.getY(), target.getZ());
 			case COLLECT -> Text.translatable("mapsmith.gather.collecting");
 			case RETURN -> Text.translatable("mapsmith.gather.returning");
+			case DIG -> Text.translatable("mapsmith.gather.digging");
 			default -> Text.translatable("mapsmith.gather.looking");
 		};
 	}

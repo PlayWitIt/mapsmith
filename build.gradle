@@ -21,6 +21,10 @@ dependencies {
 	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
 	modCompileOnly "com.terraformersmc:modmenu:${project.modmenu_version}"
 	modLocalRuntime "com.terraformersmc:modmenu:${project.modmenu_version}"
+	// Meteor, only to test alongside it in the development game: -PmeteorJar=/path/to/meteor-client.jar. Never bundled.
+	// Its own libraries come nested in its jar, which the development game doesn't load: -PmeteorLibs=<them, unpacked>.
+	if (project.hasProperty('meteorJar')) modLocalRuntime files(project.property('meteorJar'))
+	if (project.hasProperty('meteorLibs')) modLocalRuntime fileTree(dir: project.property('meteorLibs'), include: '*.jar')
 	testImplementation "org.junit.jupiter:junit-jupiter:${project.junit_version}"
 	testRuntimeOnly "org.junit.platform:junit-platform-launcher"
 }
@@ -70,7 +74,20 @@ loom {
 			name = "Ultimate Test"
 			vmArgs "-Dmapsmith.ultimate=true", "-Dmapsmith.debug=true", "-Xmx1536m",
 					"-Dmapsmith.ultimate.region=${findProperty('ultRegion') ?: '40,16,71,47'}",
-					"-Dmapsmith.ultimate.minutes=${findProperty('ultMinutes') ?: 90}"
+					"-Dmapsmith.ultimate.minutes=${findProperty('ultMinutes') ?: 90}",
+					"-Dmapsmith.ultimate.picture=${findProperty('ultPicture') ?: 'mapsmith/pictures/rickroll.png'}"
+			runDir "run"
+		}
+		waterTest {
+			client()
+			name = "Water Test"
+			vmArgs "-Dmapsmith.selftest=true", "-Dmapsmith.selftest.water=true", "-Dmapsmith.debug=true", "-Xmx1536m"
+			runDir "run"
+		}
+		ceilingTest {
+			client()
+			name = "Ceiling Test"
+			vmArgs "-Dmapsmith.selftest=true", "-Dmapsmith.selftest.ceiling=true", "-Dmapsmith.selftest.boxed=" + (project.findProperty("boxed") ?: "false"), "-Dmapsmith.selftest.undo=" + (project.findProperty("undo") ?: "false"), "-Dmapsmith.debug=true", "-Xmx1536m"
 			runDir "run"
 		}
 		stairsTest {

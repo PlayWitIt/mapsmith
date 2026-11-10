@@ -51,6 +51,20 @@ final class Builder {
 	private static double budget;
 	private static BlockPos breaking;
 	private static final Map<BlockPos, Integer> recent = new HashMap<>();
+	/** How many times each block has been placed or broken this run. */
+	private static final Map<BlockPos, Integer> redone = new HashMap<>();
+	/**
+	 * Blocks that won't stay put however often they're done (they fall, pop off, or the server undoes them): left be,
+	 * or it would go round fixing them for ever. Told to the player at the end.
+	 */
+	static final java.util.Set<BlockPos> wontStay = new java.util.LinkedHashSet<>();
+	private static final int REDO_LIMIT = 8;
+
+	/** Counts one go at a block; past the limit it's given up on. */
+	private static void redo(BlockPos pos) {
+		BlockPos p = pos.toImmutable();
+		if (redone.merge(p, 1, Integer::sum) > REDO_LIMIT && wontStay.add(p)) debug("giving up on {}: done {} times and it won't stay", p, REDO_LIMIT);
+	}
 	private static final Map<Long, Integer> skipNode = new HashMap<>();
 	/** Blocks it's out of: how many of each are wanted nearby. */
 	static final Map<Block, Integer> missing = new LinkedHashMap<>();
@@ -97,6 +111,8 @@ final class Builder {
 		state = State.RUNNING;
 		missing.clear();
 		skipNode.clear();
+		redone.clear();
+		wontStay.clear();
 		Restock.reset();
 		failures = 0;
 		goal = null;
@@ -105,8 +121,23 @@ final class Builder {
 		say(client, Text.translatable("mapsmith.builder.started_chat"));
 	}
 
+	/** A pause put off until the player is out of the water (paused there, they'd sink and drown). */
+	private static Text pausing;
+
 	static void stop(MinecraftClient client, State to, Text why) {
+		stop(client, to, why, false);
+	}
+
+	/** {@code now}: the player asked, so even under water. */
+	private static void stop(MinecraftClient client, State to, Text why, boolean now) {
 		if (state == State.OFF && to == State.OFF) return;
+		ClientPlayerEntity p = client.player;
+		if (!now && to == State.PAUSED && state == State.RUNNING && p != null && !p.getAbilities().creativeMode && p.isSubmergedInWater()) {
+			pausing = why;
+			walker.clear(client);
+			return;
+		}
+		pausing = null;
 		state = to;
 		status = why;
 		walker.clear(client);
@@ -119,7 +150,7 @@ final class Builder {
 	}
 
 	static void toggle(MinecraftClient client) {
-		if (state == State.RUNNING) stop(client, State.PAUSED, Text.translatable("mapsmith.builder.paused"));
+		if (state == State.RUNNING) stop(client, State.PAUSED, Text.translatable("mapsmith.builder.paused"), true);
 		else start(client);
 	}
 
@@ -133,17 +164,44 @@ final class Builder {
 
 	/** What the art needs at a position, given what's there. */
 	static Need need(Plan plan, ClientWorld world, BlockPos pos, BlockState state) {
+		if (!wontStay.isEmpty() && wontStay.contains(pos)) return Need.NOTHING;
 		Plan.Kind kind = plan.kind(pos.getX(), pos.getY(), pos.getZ());
 		if (kind == Plan.Kind.NONE || plan.satisfied(world, pos, state)) return Need.NOTHING;
 		return switch (kind) {
-			// Water in the way is filled in first, then broken.
-			case CLEAR -> state.getFluidState().isEmpty() ? Need.BREAK : Need.PLACE;
+			// Water in the way is filled in first, then broken, but not while there's water beside it to run straight
+			// back in: then it's holding the water back, and it goes once that water has been dealt with.
+			case CLEAR -> !state.getFluidState().isEmpty() ? Need.PLACE : wetBeside(world, pos) ? Need.NOTHING : Need.BREAK;
 			case ART -> state.isReplaceable() ? Need.PLACE : Need.BREAK;
 			default -> state.isReplaceable() ? Need.PLACE : Need.BREAK;
 		};
 	}
 
 	private static int screenTicks;
+
+	/** The sides water runs into a cell from: above it, and level with it. */
+	private static final Direction[] INFLOW = {Direction.UP, Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST};
+
+	/** Water right beside a cell, that would run into it if the cell were empty. */
+	static boolean wetBeside(ClientWorld world, BlockPos pos) {
+		for (Direction d : INFLOW) if (!world.getBlockState(pos.offset(d)).getFluidState().isEmpty()) return true;
+		return false;
+	}
+
+	/**
+	 * Where water gets into the space above the art from somewhere the builder never works (outside the art, outside
+	 * the region being built, or above the headroom): that's where it's blocked off, or the space above the art would be
+	 * filled and broken and filled again for ever. Null if there's no such water beside {@code pos}, or nothing in
+	 * {@code pos} for it to matter to.
+	 */
+	static BlockPos inflow(Plan plan, ClientWorld world, BlockPos pos, BlockState state) {
+		if (state.isAir() || plan.kind(pos.getX(), pos.getY(), pos.getZ()) != Plan.Kind.CLEAR) return null;
+		for (Direction d : INFLOW) {
+			BlockPos n = pos.offset(d);
+			if (world.getBlockState(n).getFluidState().isEmpty()) continue;
+			if (!inRegion(plan, n.getX(), n.getZ()) || plan.kind(n.getX(), n.getY(), n.getZ()) == Plan.Kind.NONE) return n;
+		}
+		return null;
+	}
 
 	/** Clicking this block would open something (a chest, a crafting table, a door…) instead of placing against it. */
 	static boolean opensScreen(ClientWorld world, BlockPos pos) {
@@ -173,13 +231,41 @@ final class Builder {
 			return;
 		}
 		if (tick % 10 == 0) Survive.tossJunk(client, plan, tick);
+		// Under water and running out of air: up for a breath before anything else.
+		if (Survive.surface(client, pausing != null)) {
+			walker.stop(client);
+			status = Text.translatable("mapsmith.builder.air");
+			return;
+		}
+		if (pausing != null) {
+			// Up out of the water now: pause as it meant to.
+			Text why = pausing;
+			pausing = null;
+			stop(client, State.PAUSED, why);
+			return;
+		}
+		// Something attacking: fight it off first.
+		if (Survive.defend(client)) {
+			walker.stop(client);
+			Gather.pause(client);
+			status = Text.translatable("mapsmith.builder.fighting");
+			return;
+		}
+		// Low on health: stop and heal (eating, or waiting while something else eats), then carry on.
+		if (client.currentScreen == null && Survive.heal(client)) {
+			walker.stop(client);
+			Gather.pause(client);
+			status = Text.translatable("mapsmith.builder.healing", String.format("%.0f", player.getHealth()));
+			return;
+		}
+		if (Survive.cantHeal) {
+			Survive.cantHeal = false;
+			if (Restock.active()) Restock.forget();
+			Gather.forget(client);
+			stop(client, State.PAUSED, Text.translatable("mapsmith.builder.low_health").formatted(Formatting.RED));
+			return;
+		}
 		if (Restock.active()) {
-			if (player.getHealth() < 6 && !player.getAbilities().invulnerable) {
-				Restock.forget();
-				if (player.currentScreenHandler != player.playerScreenHandler) player.closeHandledScreen();
-				stop(client, State.PAUSED, Text.translatable("mapsmith.builder.low_health").formatted(Formatting.RED));
-				return;
-			}
 			status = Restock.status();
 			Restock.tick(client, plan);
 			if (!Restock.active() && Restock.failure != null) {
@@ -191,11 +277,6 @@ final class Builder {
 			return;
 		}
 		if (Gather.active()) {
-			if (player.getHealth() < 6 && !player.getAbilities().invulnerable) {
-				Gather.forget(client);
-				stop(client, State.PAUSED, Text.translatable("mapsmith.builder.low_health").formatted(Formatting.RED));
-				return;
-			}
 			if (Survive.tick(client)) return;
 			status = Gather.status();
 			Gather.tick(client, plan);
@@ -221,10 +302,6 @@ final class Builder {
 			return;
 		}
 		screenTicks = 0;
-		if (player.getHealth() < 6 && !player.getAbilities().invulnerable) {
-			stop(client, State.PAUSED, Text.translatable("mapsmith.builder.low_health").formatted(Formatting.RED));
-			return;
-		}
 		if (!plan.inColumns(player.getBlockX(), player.getBlockZ()) && distanceToArt(plan, player) > 24) {
 			stop(client, State.PAUSED, Text.translatable("mapsmith.builder.too_far", plan.x0 + plan.width() / 2, plan.z0 + plan.height() / 2));
 			return;
@@ -275,6 +352,7 @@ final class Builder {
 				if (r == Result.PLACED) {
 					budget--;
 					placed++;
+					redo(pos);
 					recent.put(pos.toImmutable(), tick);
 					didSomething = true;
 				} else if (r == Result.IN_THE_WAY && blockedBySelf == null) {
@@ -327,6 +405,8 @@ final class Builder {
 					pos.set(x, y, z);
 					if (eye.squaredDistanceTo(x + 0.5, y + 0.5, z + 0.5) > r2) continue;
 					BlockState s = world.getBlockState(pos);
+					BlockPos dam = inflow(plan, world, pos, s);
+					if (dam != null && !place.contains(dam) && eye.squaredDistanceTo(Vec3d.ofCenter(dam)) <= r2) place.add(dam);
 					Need n = need(plan, world, pos, s);
 					if (n == Need.PLACE) place.add(pos.toImmutable());
 					// Never the block it's standing on (say, the top of a pillar it went up on): that goes once it steps off.
@@ -473,7 +553,19 @@ final class Builder {
 
 	private static void startBreaking(MinecraftClient client, ClientPlayerEntity player, ClientWorld world, BlockPos pos) {
 		BlockState s = world.getBlockState(pos);
+		redo(pos);
 		bestTool(client, player, s);
+		// In creative a sword (or a trident, a mace…) in hand can't break anything: put something else in hand.
+		if (player.getAbilities().creativeMode && !player.getMainHandStack().getItem().canMine(player.getMainHandStack(), s, world, pos, player)) {
+			PlayerInventory inv = player.getInventory();
+			for (int i = 0; i < PlayerInventory.getHotbarSize(); i++) {
+				ItemStack st = inv.getStack(i);
+				if (st.isEmpty() || st.getItem().canMine(st, s, world, pos, player)) {
+					inv.setSelectedSlot(i);
+					break;
+				}
+			}
+		}
 		// The face towards the player.
 		Direction side = Direction.getFacing(player.getEyePos().subtract(Vec3d.ofCenter(pos)));
 		if (MapsmithConfig.INSTANCE.rotate) look(player, Vec3d.ofCenter(pos));
@@ -595,8 +687,17 @@ final class Builder {
 				}
 				stop(client, State.PAUSED, (Restock.failure != null ? Restock.failure.copy()
 						: Text.translatable("mapsmith.builder.out_of", missingText())).formatted(Formatting.YELLOW));
+			} else if (!recent.isEmpty()) {
+				// Just placed something: wait to see it stays (the server can undo it) before calling it done.
+				return;
 			} else if (allLoaded(plan, world)) {
-				stop(client, State.DONE, Text.translatable("mapsmith.builder.done", placed, broken).formatted(Formatting.GREEN));
+				if (wontStay.isEmpty()) {
+					stop(client, State.DONE, Text.translatable("mapsmith.builder.done", placed, broken).formatted(Formatting.GREEN));
+				} else {
+					stop(client, State.DONE, Text.translatable("mapsmith.builder.done_but", placed, broken,
+							wontStay.size() == 1 ? "1 block" : wontStay.size() + " blocks", wontStayText(world))
+							.formatted(Formatting.YELLOW));
+				}
 			} else {
 				stop(client, State.PAUSED, Text.translatable("mapsmith.builder.unloaded"));
 			}
@@ -606,6 +707,15 @@ final class Builder {
 		double r = reach(player);
 		if (flying(player)) {
 			BlockPos stand = flyStand(plan, world, player, target);
+			// Boxed in with no way round: in creative it may break its way out, but never through the art.
+			walker.breakable = cell -> player.getAbilities().creativeMode && switch (plan.kind(cell.getX(), cell.getY(), cell.getZ())) {
+				case NONE, CLEAR -> true;
+				default -> need(plan, world, cell, world.getBlockState(cell)) == Need.BREAK;
+			};
+			walker.breakAt = cell -> {
+				if (breaking == null) startBreaking(client, player, world, cell);
+				return true;
+			};
 			walker.flyTo(world, player, Vec3d.ofBottomCenter(stand), plan.topY() + 2);
 			walker.tick(client);
 			return;
@@ -652,13 +762,27 @@ final class Builder {
 		BlockPos best = null;
 		for (int x : new int[] {plan.x0 + mid, target.getX()}) {
 			for (int dz : new int[] {0, 1, -1}) {
-				BlockPos p = openSky(world, x, target.getZ() + dz, target.getY() + 2, plan.topY() + 3);
-				if (best == null) best = p;
-				Vec3d eye = new Vec3d(p.getX() + 0.5, p.getY() + 1.62, p.getZ() + 0.5);
-				if (eye.squaredDistanceTo(Vec3d.ofCenter(target)) <= r * r && !p.equals(target) && !p.up().equals(target)) return p;
+				// Open sky above is quickest to fly to; failing that, the first gap above the block (under a ledge, say):
+				// flight goes round to get in there.
+				for (BlockPos p : new BlockPos[] {openSky(world, x, target.getZ() + dz, target.getY() + 2, plan.topY() + 3),
+						gap(world, x, target.getZ() + dz, target.getY() + 2, plan.topY() + 3)}) {
+					if (p == null) continue;
+					if (best == null) best = p;
+					Vec3d eye = new Vec3d(p.getX() + 0.5, p.getY() + 1.62, p.getZ() + 0.5);
+					if (eye.squaredDistanceTo(Vec3d.ofCenter(target)) <= r * r && !p.equals(target) && !p.up().equals(target)) return p;
+				}
 			}
 		}
 		return best;
+	}
+
+	/** The lowest spot at or above {@code fromY} in a column with room for the player's body; null if none up to {@code top}. */
+	private static BlockPos gap(ClientWorld world, int x, int z, int fromY, int top) {
+		BlockPos.Mutable m = new BlockPos.Mutable();
+		for (int y = fromY; y <= top; y++) {
+			if (Walker.passable(world, m.set(x, y, z)) && Walker.passable(world, m.set(x, y + 1, z))) return new BlockPos(x, y, z);
+		}
+		return null;
 	}
 
 	/** The lowest spot at or above {@code fromY} in a column with nothing above it up to {@code top}: flight comes down to it from above. */
@@ -701,7 +825,14 @@ final class Builder {
 					}
 					for (int y = plan.y0 - 1; y <= plan.topY(); y++) {
 						pos.set(x, y, z);
-						Need n = need(plan, world, pos, world.getBlockState(pos));
+						BlockState here = world.getBlockState(pos);
+						Need n = need(plan, world, pos, here);
+						BlockPos dam = inflow(plan, world, pos, here);
+						if (dam != null) {
+							// The water's way in comes first: the block here waits on it.
+							pos.set(dam);
+							n = Need.PLACE;
+						}
 						if (n == Need.NOTHING) continue;
 						laneDone = false;
 						if (n == Need.BREAK && !MapsmithConfig.INSTANCE.fixMistakes) continue;
@@ -762,6 +893,21 @@ final class Builder {
 			}
 		}
 		return out;
+	}
+
+	/** The first few blocks that wouldn't stay: where, and what's there. */
+	private static String wontStayText(ClientWorld world) {
+		StringBuilder b = new StringBuilder();
+		int n = 0;
+		for (BlockPos p : wontStay) {
+			if (n++ == 3) {
+				b.append(", …");
+				break;
+			}
+			if (n > 1) b.append(", ");
+			b.append(p.getX()).append(' ').append(p.getY()).append(' ').append(p.getZ());
+		}
+		return b.toString();
 	}
 
 	static Text missingText() {

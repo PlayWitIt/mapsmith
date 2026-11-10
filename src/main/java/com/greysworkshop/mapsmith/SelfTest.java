@@ -129,6 +129,14 @@ final class SelfTest {
 					Plan plan = Mapsmith.plan();
 					check("placed on the map grid: corner -64,-64 at y -60 (" + (plan == null ? "none" : plan.x0 + "," + plan.y0 + "," + plan.z0) + ")",
 							plan != null && plan.x0 == -64 && plan.z0 == -64 && plan.y0 == -60);
+					if (Boolean.getBoolean("mapsmith.selftest.water")) {
+						next("water_setup");
+						return;
+					}
+					if (Boolean.getBoolean("mapsmith.selftest.ceiling")) {
+						next("ceiling_setup");
+						return;
+					}
 					if (Boolean.getBoolean("mapsmith.selftest.stairs")) {
 						command(client, "gamemode survival @p");
 						next("stairs_setup");
@@ -224,11 +232,170 @@ final class SelfTest {
 			case "survival_build" -> survivalBuild(client, since);
 			case "stairs_setup" -> stairsSetup(client, since);
 			case "stairs_build" -> stairsBuild(client, since);
+			case "water_setup" -> waterSetup(client, since);
+			case "water_build" -> waterBuild(client, since);
+			case "ceiling_setup" -> ceilingSetup(client, since);
+			case "ceiling_build" -> ceilingBuild(client, since);
+			case "ceiling_check" -> ceilingCheck(client, since);
 			case "finish" -> {
 				if (since == 40) finish(client);
 			}
 			default -> {
 			}
+		}
+	}
+
+	/** The water test: the west edge of a map, with water running in from outside the art. */
+	private static final int[] WATER = {0, 0, 7, 7};
+	private static final BlockPos WATER_SOURCE = new BlockPos(191, -59, -61);
+
+	/**
+	 * Water from outside the art that spreads over it: whatever the builder does to the space above the art, the water
+	 * comes back unless it's stopped where it comes in. Must finish, and not by filling and breaking the same blocks forever.
+	 */
+	private static void waterSetup(MinecraftClient client, int since) {
+		if (since == 1) {
+			Builder.stop(client, Builder.State.OFF, net.minecraft.text.Text.empty());
+			command(client, "gamemode creative @p");
+			command(client, "tp @p 197.5 -60 -62.5 0 30");
+		}
+		if (since == 20) {
+			try {
+				Project p = Project.create(picture);
+				p.settings.mode = ArtSettings.Mode.FLAT;
+				p.carpets = false;
+				p.save();
+				Mapsmith.open(p);
+			} catch (IOException e) {
+				check("water project (" + e + ")", false);
+			}
+		}
+		if (since == 60 && Mapsmith.art() != null && Mapsmith.art().done() != null) {
+			Mapsmith.placeHere(client, 0, 0);
+			Plan plan = Mapsmith.plan();
+			check("water: art placed at 192,-64 (" + (plan == null ? "none" : plan.x0 + "," + plan.z0) + ")", plan != null && plan.x0 == 192 && plan.z0 == -64);
+			Builder.region = WATER;
+			// A spring just west of the art, up on a block so it runs out over the art rather than down beside it.
+			command(client, "fill 186 -61 -66 191 -55 -54 air");
+			command(client, "fill 186 -62 -66 191 -62 -54 stone");
+			command(client, "fill 186 -61 -66 191 -61 -54 stone");
+			command(client, "fill 186 -60 -66 191 -60 -54 stone");
+			command(client, "setblock " + WATER_SOURCE.getX() + " " + WATER_SOURCE.getY() + " " + WATER_SOURCE.getZ() + " water");
+		}
+		if (since == 100) {
+			Builder.start(client);
+			next("water_build");
+		}
+	}
+
+	private static void waterBuild(MinecraftClient client, int since) {
+		if (since % 200 == 0) log("water: " + Builder.state + " placed " + Builder.placed + " broken " + Builder.broken + " · " + Builder.status.getString());
+		boolean finished = Builder.state != Builder.State.RUNNING;
+		if (finished || since > 6000) {
+			check("water: finishes (" + Builder.status.getString() + ", after " + since + " ticks)", Builder.state == Builder.State.DONE);
+			// 8 by 9 columns: one block each, some fills of water, a few dams. Hundreds means it went round in circles.
+			check("water: no filling and breaking in circles (placed " + Builder.placed + ", broke " + Builder.broken + ")", Builder.placed < 200 && Builder.broken < 120);
+			int wet = 0;
+			Plan plan = Mapsmith.plan();
+			for (int x = plan.x0; x <= plan.x0 + WATER[2]; x++) {
+				for (int z = plan.z0 - 1; z <= plan.z0 + WATER[3]; z++) {
+					for (int y = plan.y0; y <= plan.topY(); y++) {
+						if (!client.world.getBlockState(new BlockPos(x, y, z)).getFluidState().isEmpty()) wet++;
+					}
+				}
+			}
+			check("water: none left on the art (" + wet + " cells)", wet == 0);
+			checkRegion(client, WATER, "water");
+			screenshot(client, "water_done");
+			Builder.stop(client, Builder.State.OFF, net.minecraft.text.Text.empty());
+			next("finish");
+		}
+	}
+
+	/** The ceiling test: the same corner of the map, flying in creative from under a roof, with a ledge over half the art. */
+	private static final int[] CEILING = {0, 0, 7, 7};
+
+	/**
+	 * Blocks over the player's head: it starts under a roof just over its head beside the art, and a ledge hangs over
+	 * the west half of the art, out of the way of the building but in the way of coming down from above. Flying
+	 * straight up gets nowhere: it has to go round. Must finish without being moved.
+	 */
+	private static void ceilingSetup(MinecraftClient client, int since) {
+		if (since == 1) {
+			Builder.stop(client, Builder.State.OFF, net.minecraft.text.Text.empty());
+			command(client, "gamemode creative @p");
+			command(client, "fill 184 -59 -78 206 -45 -50 air");
+			command(client, "tp @p 197.5 -60 -62.5 0 30");
+		}
+		if (since == 20) {
+			try {
+				Project p = Project.create(picture);
+				p.settings.mode = ArtSettings.Mode.FLAT;
+				p.carpets = false;
+				p.save();
+				Mapsmith.open(p);
+			} catch (IOException e) {
+				check("ceiling project (" + e + ")", false);
+			}
+		}
+		if (since == 60 && Mapsmith.art() != null && Mapsmith.art().done() != null) {
+			Mapsmith.placeHere(client, 0, 0);
+			Plan plan = Mapsmith.plan();
+			check("ceiling: art placed at 192,-64 (" + (plan == null ? "none" : plan.x0 + "," + plan.z0) + ")", plan != null && plan.x0 == 192 && plan.z0 == -64);
+			Builder.region = CEILING;
+			// A roof right over the player's head, with a pillar holding it up.
+			command(client, "fill 193 -58 -74 200 -58 -67 stone");
+			command(client, "fill 193 -60 -74 193 -59 -74 stone");
+			// A ledge over the west half of the art, above where the builder works.
+			command(client, "fill 190 -55 -66 195 -55 -55 oak_planks");
+			command(client, "tp @p 196.5 -60 -70.5 0 30");
+			// Boxed in: glass all round, no way out but through it.
+			if (Boolean.getBoolean("mapsmith.selftest.boxed")) command(client, "fill 195 -61 -72 198 -57 -69 glass hollow");
+			startX = client.player.getX();
+			startZ = client.player.getZ();
+		}
+		if (since == 100) {
+			Builder.start(client);
+			next("ceiling_build");
+		}
+	}
+
+	/** A block of the art that something keeps undoing (with -Pundo=true): the builder must give up on it and finish. */
+	private static final BlockPos UNDONE = new BlockPos(197, -60, -60);
+
+	private static void ceilingBuild(MinecraftClient client, int since) {
+		if (Boolean.getBoolean("mapsmith.selftest.undo") && Builder.state == Builder.State.RUNNING) {
+			server(client, s -> s.getOverworld().setBlockState(UNDONE, net.minecraft.block.Blocks.AIR.getDefaultState()));
+		}
+		if (since % 200 == 0) log("ceiling: " + Builder.state + " placed " + Builder.placed + " broken " + Builder.broken + " · " + Builder.status.getString()
+				+ " · at " + client.player.getBlockPos().toShortString());
+		boolean finished = Builder.state != Builder.State.RUNNING;
+		if (finished || since > 3000) {
+			check("ceiling: finishes (" + Builder.status.getString() + ", after " + since + " ticks)", Builder.state == Builder.State.DONE);
+			if (Boolean.getBoolean("mapsmith.selftest.undo")) {
+				check("ceiling: gave up on the block that keeps being undone (" + Builder.wontStay + ")", Builder.wontStay.contains(UNDONE));
+				check("ceiling: and nothing else (" + Builder.wontStay.size() + ")", Builder.wontStay.size() == 1);
+				check("ceiling: says where it is", Builder.status.getString().contains("197 -60 -60"));
+			}
+			if (Boolean.getBoolean("mapsmith.selftest.boxed")) {
+				int glass = 0;
+				for (BlockPos p : BlockPos.iterate(195, -61, -72, 198, -57, -69)) if (client.world.getBlockState(p).isOf(net.minecraft.block.Blocks.GLASS)) glass++;
+				// 4x5x4 hollow: 68 blocks of glass; a way out is two, maybe a few more.
+				check("ceiling: broke out of the box through only a few blocks (" + (68 - glass) + ")", glass >= 62 && glass < 68);
+			} else check("ceiling: the roof is still there", client.world.getBlockState(new BlockPos(197, -58, -70)).isOf(net.minecraft.block.Blocks.STONE));
+			check("ceiling: the ledge is still there", client.world.getBlockState(new BlockPos(193, -55, -60)).isOf(net.minecraft.block.Blocks.OAK_PLANKS));
+			screenshot(client, "ceiling_done");
+			Builder.stop(client, Builder.State.OFF, net.minecraft.text.Text.empty());
+			// The map shows the top block: the ledge would hide the art under it.
+			command(client, "fill 190 -55 -66 195 -55 -55 air");
+			next("ceiling_check");
+		}
+	}
+
+	private static void ceilingCheck(MinecraftClient client, int since) {
+		if (since == 20) {
+			if (!Boolean.getBoolean("mapsmith.selftest.undo")) checkRegion(client, CEILING, "ceiling");
+			next("finish");
 		}
 	}
 
@@ -446,6 +613,10 @@ final class SelfTest {
 	}
 
 	private static void checkRegion(MinecraftClient client) {
+		checkRegion(client, REGION, "survival");
+	}
+
+	private static void checkRegion(MinecraftClient client, int[] REGION, String what) {
 		MapCheck c = new MapCheck(Mapsmith.plan());
 		c.step(client.world, Mapsmith.plan().width());
 		int right = 0, wrong = 0;
@@ -460,7 +631,7 @@ final class SelfTest {
 				}
 			}
 		}
-		check("survival: every pixel of the region maps right (" + right + " right, " + wrong + " not)", wrong == 0);
+		check(what + ": every pixel of the region maps right (" + right + " right, " + wrong + " not)", wrong == 0);
 	}
 
 	private static void logWrong(MapState state) {

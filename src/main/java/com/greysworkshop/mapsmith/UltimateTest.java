@@ -111,14 +111,24 @@ final class UltimateTest {
 
 	private static void setup(MinecraftClient client) {
 		command(client, "clear @p");
-		command(client, "gamerule keepInventory true");
-		// Tools and food, nothing else.
-		command(client, "give @p minecraft:netherite_pickaxe[enchantments={efficiency:5,unbreaking:3,mending:1}]");
-		command(client, "give @p minecraft:netherite_pickaxe[enchantments={efficiency:5,unbreaking:3,silk_touch:1}]");
-		command(client, "give @p minecraft:netherite_shovel[enchantments={efficiency:5,unbreaking:3,mending:1}]");
-		command(client, "give @p minecraft:netherite_shovel[enchantments={efficiency:5,unbreaking:3,silk_touch:1}]");
-		command(client, "give @p minecraft:netherite_axe[enchantments={efficiency:5,unbreaking:3}]");
+		// Real survival: dying drops everything.
+		command(client, "gamerule keepInventory false");
+		// What the player builds in: enchanted diamond gear, an elytra worn instead of the chestplate, tools and food.
+		String armour = "protection:4,unbreaking:3,mending:1";
+		command(client, "item replace entity @p armor.head with minecraft:diamond_helmet[enchantments={" + armour + ",respiration:3,aqua_affinity:1}]");
+		command(client, "item replace entity @p armor.chest with minecraft:elytra[enchantments={unbreaking:3,mending:1}]");
+		command(client, "item replace entity @p armor.legs with minecraft:diamond_leggings[enchantments={" + armour + "}]");
+		command(client, "item replace entity @p armor.feet with minecraft:diamond_boots[enchantments={" + armour + ",feather_falling:4,depth_strider:3}]");
+		command(client, "give @p minecraft:diamond_chestplate[enchantments={" + armour + "}]");
+		command(client, "give @p minecraft:diamond_sword[enchantments={sharpness:5,unbreaking:3,mending:1}]");
+		command(client, "give @p minecraft:diamond_pickaxe[enchantments={efficiency:5,unbreaking:3,mending:1,fortune:3}]");
+		command(client, "give @p minecraft:diamond_pickaxe[enchantments={efficiency:5,unbreaking:3,silk_touch:1}]");
+		command(client, "give @p minecraft:diamond_shovel[enchantments={efficiency:5,unbreaking:3,mending:1}]");
+		command(client, "give @p minecraft:diamond_shovel[enchantments={efficiency:5,unbreaking:3,silk_touch:1}]");
+		command(client, "give @p minecraft:diamond_axe[enchantments={efficiency:5,unbreaking:3,mending:1}]");
+		command(client, "give @p minecraft:firework_rocket 64");
 		command(client, "give @p minecraft:cooked_beef 64");
+		meteor();
 		try {
 			Path pic = Project.pictures().resolve("rickroll.png");
 			Files.createDirectories(pic.getParent());
@@ -127,6 +137,26 @@ final class UltimateTest {
 			if (!src.equals(pic)) Files.copy(src, pic, StandardCopyOption.REPLACE_EXISTING);
 		} catch (IOException e) {
 			log("FAIL no picture: " + e);
+		}
+	}
+
+	/** With Meteor loaded (-PmeteorJar=…): its elytra flight and auto-eat on, as the player has them. Reflection: it's not a dependency. */
+	private static void meteor() {
+		try {
+			Class<?> modules = Class.forName("meteordevelopment.meteorclient.systems.modules.Modules");
+			Object all = modules.getMethod("get").invoke(null);
+			StringBuilder on = new StringBuilder();
+			// As the player has it: elytra flight and eating by itself.
+			for (String name : new String[] {"elytra-fly", "auto-eat"}) {
+				Object m = modules.getMethod("get", String.class).invoke(all, name);
+				if (!(boolean) m.getClass().getMethod("isActive").invoke(m)) m.getClass().getMethod("toggle").invoke(m);
+				on.append(name).append(' ').append(m.getClass().getMethod("isActive").invoke(m)).append(' ');
+			}
+			log("Meteor loaded: " + on);
+		} catch (ClassNotFoundException e) {
+			log("Meteor not loaded");
+		} catch (ReflectiveOperationException | RuntimeException e) {
+			log("FAIL couldn't turn on Meteor's elytra fly: " + e);
 		}
 	}
 
@@ -153,8 +183,22 @@ final class UltimateTest {
 		int x0 = Plan.mapCorner(client.player.getBlockX()), z0 = Plan.mapCorner(client.player.getBlockZ());
 		int[] r = region != null ? region : new int[] {0, 0, 127, 127};
 		int cx = x0 + (r[0] + r[2]) / 2, cz = z0 + (r[1] + r[3]) / 2;
-		int y = server(client, s -> s.getOverworld().getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, cx, cz));
-		command(client, "tp @p " + cx + ".5 " + y + " " + cz + ".5");
+		// On dry ground: the nearest to the middle (the middle may be a lake).
+		int[] at = server(client, s -> {
+			var w = s.getOverworld();
+			for (int d = 0; d < 64; d++) {
+				for (int dx = -d; dx <= d; dx++) {
+					for (int dz = -d; dz <= d; dz++) {
+						if (Math.max(Math.abs(dx), Math.abs(dz)) != d) continue;
+						int x = cx + dx, z = cz + dz;
+						int top = w.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, x, z);
+						if (w.getFluidState(new net.minecraft.util.math.BlockPos(x, top - 1, z)).isEmpty()) return new int[] {x, top, z};
+					}
+				}
+			}
+			return new int[] {cx, w.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, cx, cz), cz};
+		});
+		command(client, "tp @p " + at[0] + ".5 " + at[1] + " " + at[2] + ".5");
 		phase = "placing";
 		client.execute(() -> client.execute(() -> {
 			Mapsmith.placeHere(client, 0, 0);
@@ -169,6 +213,23 @@ final class UltimateTest {
 	}
 
 	private static void run(MinecraftClient client, int since) {
+		if (client.player.isDead() && !wasDead) {
+			deaths.add(elapsed() + " " + client.player.getDamageTracker().getDeathMessage().getString());
+			log("DIED " + deaths.get(deaths.size() - 1));
+		}
+		wasDead = client.player.isDead();
+		float health = client.player.getHealth();
+		if (health < lastHealth - 0.01f) {
+			var src = client.player.getRecentDamageSource();
+			var at = client.player.getBlockPos();
+			log(String.format("HURT %.1f -> %.1f by %s at %s · feet %s · head %s · %s", lastHealth, health,
+					src == null ? "?" : src.getName() + (src.getAttacker() != null ? " (" + src.getAttacker().getType().getUntranslatedName() + ")" : ""),
+					at.toShortString(), client.world.getBlockState(at).getBlock().getName().getString(),
+					client.world.getBlockState(at.up()).getBlock().getName().getString(), Builder.status.getString()));
+		}
+		lastHealth = health;
+		if (client.player.isDead() && client.currentScreen instanceof net.minecraft.client.gui.screen.DeathScreen) client.player.requestRespawn();
+		if (client.player.isGliding() && ++glideTicks % 100 == 1) log("gliding at " + client.player.getBlockPos().toShortString() + " · " + Builder.status.getString());
 		if (since % 600 == 0) {
 			log(String.format("%d min: %s, placed %d, broken %d, at %s · %s", (System.currentTimeMillis() - runStart) / 60000, Builder.state,
 					Builder.placed, Builder.broken, client.player.getBlockPos().toShortString(), Builder.status.getString()));
@@ -213,7 +274,10 @@ final class UltimateTest {
 		}
 	}
 
-	private static int pressAfter, lastWorkAt;
+	private static int pressAfter, lastWorkAt, glideTicks;
+	private static boolean wasDead;
+	private static float lastHealth = 20;
+	private static final List<String> deaths = new ArrayList<>();
 	private static long lastWork = -1;
 
 	private static int[] score(MinecraftClient client) {
@@ -240,6 +304,9 @@ final class UltimateTest {
 				+ " (" + Builder.status.getString() + ")");
 		if (s != null) log("REPORT map: " + s[0] + " pixels right, " + s[1] + " wrong or missing (" + String.format("%.1f", 100.0 * s[0] / (s[0] + s[1])) + "%)");
 		log("REPORT pauses (" + pauses.size() + "): " + (pauses.isEmpty() ? "none" : String.join(" | ", pauses)));
+		log("REPORT deaths (" + deaths.size() + "): " + (deaths.isEmpty() ? "none" : String.join(" | ", deaths)));
+		log("REPORT ticks spent gliding: " + glideTicks + " · elytra durability " + client.player.getEquippedStack(net.minecraft.entity.EquipmentSlot.CHEST).getDamage()
+				+ " used · armour: " + client.player.getEquippedStack(net.minecraft.entity.EquipmentSlot.CHEST).getItem());
 		log("REPORT health " + client.player.getHealth() + ", hunger " + client.player.getHungerManager().getFoodLevel());
 	}
 
