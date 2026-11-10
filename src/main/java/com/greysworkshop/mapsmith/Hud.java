@@ -43,7 +43,8 @@ final class Hud {
 				MapCheck check = Mapsmith.check();
 				if (check != null && check.complete) {
 					int total = plan.width() * plan.height();
-					double pct = 100.0 * check.right / total;
+					// Rounded down: 100% only when every pixel is right.
+					double pct = Math.floor(1000.0 * check.right / total) / 10;
 					Formatting f = check.right == total ? Formatting.GREEN : Formatting.YELLOW;
 					lines.add(Text.translatable("mapsmith.hud.check", String.format("%.1f", pct), check.wrong, check.unknown).formatted(f));
 				}

@@ -60,8 +60,22 @@ final class Walker {
 				|| s.isOf(Blocks.CAMPFIRE) || s.isOf(Blocks.SOUL_CAMPFIRE) || s.isOf(Blocks.WITHER_ROSE) || s.isOf(Blocks.POINTED_DRIPSTONE);
 	}
 
-	/** Whether the player can stand with their feet in {@code feet}. */
+	/**
+	 * Whether the player can stand with their feet in {@code feet}: on something, or swimming at the top of water. Never
+	 * with water over their head: a path along the bottom of a lake drowns you.
+	 */
 	static boolean standable(ClientWorld world, BlockPos feet) {
+		if (!world.getFluidState(feet.up()).isEmpty()) return false;
+		return onFloor(world, feet) || swimmable(world, feet);
+	}
+
+	/** Afloat: feet in water, head in the air. */
+	static boolean swimmable(ClientWorld world, BlockPos feet) {
+		return world.getFluidState(feet).isIn(net.minecraft.registry.tag.FluidTags.WATER) && passable(world, feet.up())
+				&& world.getFluidState(feet.up()).isEmpty();
+	}
+
+	private static boolean onFloor(ClientWorld world, BlockPos feet) {
 		boolean feetOk = passable(world, feet) || lowFloor(world, feet);
 		if (!feetOk || !passable(world, feet.up())) return false;
 		if (lowFloor(world, feet)) return true;
@@ -234,6 +248,152 @@ final class Walker {
 			}
 		}
 		cruise = clear;
+		airPath = null;
+		replans = 0;
+		// Something over the player's head, or in the way across or coming down: go round it instead.
+		Vec3d up = new Vec3d(from.x, cruise, from.z), over = new Vec3d(target.x, cruise, target.z);
+		if (!bodyClear(world, from, up) || !bodyClear(world, up, over) || !bodyClear(world, over, target)) planAir(world, player);
+	}
+
+	/** Whether the player's body can move in a straight line from one spot to another without touching a block. */
+	private static boolean bodyClear(ClientWorld world, Vec3d a, Vec3d b) {
+		int steps = (int) Math.ceil(a.distanceTo(b) * 4) + 1;
+		BlockPos.Mutable pos = new BlockPos.Mutable();
+		for (int i = 0; i <= steps; i++) {
+			double t = (double) i / steps;
+			double x = a.x + (b.x - a.x) * t, y = a.y + (b.y - a.y) * t, z = a.z + (b.z - a.z) * t;
+			for (double ox = -0.3; ox <= 0.3; ox += 0.6) {
+				for (double oz = -0.3; oz <= 0.3; oz += 0.6) {
+					for (double oy : new double[] {0.05, 0.9, 1.8}) {
+						if (!passable(world, pos.set(MathHelper.floor(x + ox), MathHelper.floor(y + oy), MathHelper.floor(z + oz)))) return false;
+					}
+				}
+			}
+		}
+		return true;
+	}
+
+	/** A way through the air, cell by cell, when flying straight up, across and down is blocked; null if none. */
+	private List<BlockPos> airPath;
+	private int airAt;
+	/** How many times flight has looked for a way round again, since it was last told where to go. */
+	private int replans;
+	/**
+	 * Blocks flight may break to get out when there's no way round at all (creative breaks them at once). Set by the
+	 * builder: never the art.
+	 */
+	Predicate<BlockPos> breakable = p -> false;
+	/** Breaks a block in the way of flight. Set by the builder. */
+	Predicate<BlockPos> breakAt = p -> false;
+
+	/**
+	 * Finds a way through the air to where flight is headed, round whatever is in the way; failing that, through the
+	 * fewest blocks it may break. Two cells high, so the player's body fits; no cutting corners.
+	 */
+	private boolean planAir(ClientWorld world, ClientPlayerEntity player) {
+		BlockPos start = BlockPos.ofFloored(player.getX(), player.getY() + 0.05, player.getZ());
+		BlockPos goal = BlockPos.ofFloored(flyTo.x, flyTo.y + 0.05, flyTo.z);
+		List<BlockPos> found = airSearch(world, start, goal, false);
+		if (found == null) found = airSearch(world, start, goal, true);
+		if (Boolean.getBoolean("mapsmith.debug")) Mapsmith.LOGGER.info("[builder] flying round from {} to {}: {}", start, goal,
+				found == null ? "no way" : found.size() + " steps");
+		airPath = found;
+		airAt = 0;
+		return found != null;
+	}
+
+	private List<BlockPos> airSearch(ClientWorld world, BlockPos start, BlockPos goal, boolean dig) {
+		record Node(BlockPos pos, double g, double f) {}
+		int pad = 16;
+		int minX = Math.min(start.getX(), goal.getX()) - pad, maxX = Math.max(start.getX(), goal.getX()) + pad;
+		int minZ = Math.min(start.getZ(), goal.getZ()) - pad, maxZ = Math.max(start.getZ(), goal.getZ()) + pad;
+		int minY = Math.max(world.getBottomY(), Math.min(start.getY(), goal.getY()) - 4);
+		int maxY = Math.max(start.getY(), goal.getY()) + pad;
+		Map<BlockPos, Double> best = new HashMap<>();
+		Map<BlockPos, BlockPos> from = new HashMap<>();
+		PriorityQueue<Node> open = new PriorityQueue<>((a, b) -> Double.compare(a.f, b.f));
+		open.add(new Node(start, 0, Math.sqrt(start.getSquaredDistance(goal))));
+		best.put(start, 0.0);
+		int expanded = 0;
+		while (!open.isEmpty() && expanded < MAX_NODES) {
+			Node n = open.poll();
+			if (n.g > best.getOrDefault(n.pos, Double.MAX_VALUE)) continue;
+			expanded++;
+			if (n.pos.equals(goal)) {
+				List<BlockPos> list = new ArrayList<>();
+				for (BlockPos p = goal; p != null && !p.equals(start); p = from.get(p)) list.add(0, p);
+				return list;
+			}
+			for (int dx = -1; dx <= 1; dx++) {
+				for (int dy = -1; dy <= 1; dy++) {
+					for (int dz = -1; dz <= 1; dz++) {
+						// Straight up or down, or level: diagonals in the flat only.
+						if (dy != 0 ? dx != 0 || dz != 0 : dx == 0 && dz == 0) continue;
+						BlockPos next = n.pos.add(dx, dy, dz);
+						if (next.getX() < minX || next.getX() > maxX || next.getZ() < minZ || next.getZ() > maxZ || next.getY() < minY
+								|| next.getY() > maxY) continue;
+						double cost = airCost(world, next, dig);
+						if (cost < 0) continue;
+						if (dx != 0 && dz != 0) {
+							double a = airCost(world, n.pos.add(dx, 0, 0), dig), b = airCost(world, n.pos.add(0, 0, dz), dig);
+							if (a < 0 || b < 0) continue;
+							cost += a + b;
+						}
+						double g = n.g + (dx != 0 && dz != 0 ? 1.414 : 1) + cost;
+						if (g < best.getOrDefault(next, Double.MAX_VALUE)) {
+							best.put(next, g);
+							from.put(next, n.pos);
+							open.add(new Node(next, g, g + Math.sqrt(next.getSquaredDistance(goal))));
+						}
+					}
+				}
+			}
+		}
+		return null;
+	}
+
+	/** What it costs to have the body in a cell (and the one above), over just moving: -1 if it can't. */
+	private double airCost(ClientWorld world, BlockPos feet, boolean dig) {
+		double cost = 0;
+		for (BlockPos p : new BlockPos[] {feet, feet.up()}) {
+			if (passable(world, p)) continue;
+			if (!dig || dangerous(world.getBlockState(p)) || !breakable.test(p)) return -1;
+			cost += 30;
+		}
+		return cost;
+	}
+
+	/** One tick along the way round: break what's in the way (only on a path that digs), then on to the next cell. */
+	private boolean flyAir(MinecraftClient client, ClientPlayerEntity player) {
+		if (airAt >= airPath.size()) {
+			player.setVelocity(Vec3d.ZERO);
+			airPath = null;
+			flyTo = null;
+			moving = false;
+			return true;
+		}
+		BlockPos cell = airPath.get(airAt);
+		for (BlockPos p : new BlockPos[] {cell, cell.up()}) {
+			if (!passable(client.world, p)) {
+				player.setVelocity(Vec3d.ZERO);
+				breakAt.test(p);
+				moving = true;
+				return checkStuck(client, player, Vec3d.ofCenter(p));
+			}
+		}
+		boolean last = airAt == airPath.size() - 1;
+		Vec3d aim = last ? flyTo : new Vec3d(cell.getX() + 0.5, cell.getY() + 0.05, cell.getZ() + 0.5);
+		Vec3d d = aim.subtract(player.getEntityPos());
+		double dist = d.length();
+		if (dist < (last ? 0.12 : 0.3)) {
+			airAt++;
+			return flyAir(client, player);
+		}
+		double speed = Math.min(FLY_SPEED, last ? dist * 0.5 : Math.max(0.2, dist * 0.6));
+		player.setVelocity(d.multiply(speed / dist));
+		face(player, new Vec3d(aim.x, player.getEyeY(), aim.z));
+		moving = true;
+		return checkStuck(client, player, aim);
 	}
 
 	boolean arrived() {
@@ -245,6 +405,13 @@ final class Walker {
 		ClientPlayerEntity player = client.player;
 		if (player == null) return false;
 		if (flyTo != null) return fly(client, player);
+		if (player.isGliding()) {
+			// An elytra opened (a jump in mid-air, or a client's elytra flight taking off): hands off the keys, so
+			// nothing steers it anywhere, and wait to land.
+			release(client);
+			moving = true;
+			return checkStuck(client, player, at < path.size() ? Vec3d.ofBottomCenter(path.get(at)) : player.getEntityPos());
+		}
 		if (at >= path.size()) {
 			stop(client);
 			return true;
@@ -279,7 +446,12 @@ final class Walker {
 			return tick(client);
 		}
 		face(player, aim);
-		press(client, true, next.getY() > feet.getY() && (player.isOnGround() || player.horizontalCollision), false);
+		// In water: keep swimming up, or it sinks. With an elytra on, never a jump in mid-air: that opens it.
+		boolean canGlide = net.minecraft.entity.LivingEntity.canGlideWith(player.getEquippedStack(net.minecraft.entity.EquipmentSlot.CHEST),
+				net.minecraft.entity.EquipmentSlot.CHEST);
+		boolean jump = player.isTouchingWater()
+				|| next.getY() > feet.getY() && (player.isOnGround() || player.horizontalCollision && !canGlide);
+		press(client, true, jump, false);
 		// Slow down onto a narrow last step so it doesn't overshoot.
 		client.options.sneakKey.setPressed(at == path.size() - 1 && flat < 1.2);
 		moving = true;
@@ -300,6 +472,12 @@ final class Walker {
 			player.sendAbilitiesUpdate();
 		}
 		release(client);
+		Vec3d target = flyTo;
+		if (airPath != null) {
+			if (flyAir(client, player)) return true;
+			// Lost on the way round (something moved in): look again.
+			return replanAir(client, player, target);
+		}
 		Vec3d pos = player.getEntityPos();
 		double dx = flyTo.x - pos.x, dz = flyTo.z - pos.z, flat = Math.sqrt(dx * dx + dz * dz);
 		boolean over = flat <= 0.15;
@@ -322,7 +500,18 @@ final class Walker {
 		}
 		player.setVelocity(vx, vy, vz);
 		moving = true;
-		return checkStuck(client, player, flyTo == null ? pos : flyTo);
+		if (checkStuck(client, player, flyTo)) return true;
+		// Bumped into something on the straight way: go round it.
+		return replanAir(client, player, target);
+	}
+
+	/** After getting stuck: a fresh way round from here, a couple of times at most. */
+	private boolean replanAir(MinecraftClient client, ClientPlayerEntity player, Vec3d target) {
+		if (target == null || ++replans > 2) return false;
+		flyTo = target;
+		if (planAir(client.world, player)) return true;
+		flyTo = null;
+		return false;
 	}
 
 	private static void release(MinecraftClient client) {
@@ -414,5 +603,6 @@ final class Walker {
 		stop(client);
 		path = List.of();
 		flyTo = null;
+		airPath = null;
 	}
 }

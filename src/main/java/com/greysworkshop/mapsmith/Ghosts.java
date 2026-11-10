@@ -18,7 +18,8 @@ import java.util.List;
 
 /**
  * Draws the art in the world: each block still to place as a see-through cube of its colour (supports in grey), each
- * block to break outlined in red, and the borders of the art's maps (gold) and of chunks (faint) at your feet.
+ * block to break outlined in red, and, while you have art loaded, the borders of its maps (gold) at your feet. No chunk
+ * lines are ever drawn.
  */
 final class Ghosts {
 	private Ghosts() {}
@@ -83,7 +84,7 @@ final class Ghosts {
 			if (g.breakIt) box(lines, entry, g.x - cam.x, g.y - cam.y, g.z - cam.z, 1, 1, 1, 0xFFFF2020, 3f);
 			else box(lines, entry, g.x + 0.12 - cam.x, g.y + 0.12 - cam.y, g.z + 0.12 - cam.z, 0.76, 0.76, 0.76, 0xC0000000 | g.rgb, 1.5f);
 		}
-		if (MapsmithConfig.INSTANCE.grid) grid(lines, entry, client.player, plan, cam);
+		if (MapsmithConfig.INSTANCE.grid && plan != null) grid(lines, entry, client.player, plan, cam);
 		if (own != null) own.draw(RenderLayers.lines());
 		if (list.isEmpty()) return;
 		VertexConsumer quads = consumers.getBuffer(RenderLayers.debugQuads());
@@ -94,20 +95,18 @@ final class Ghosts {
 		if (own != null) own.draw(RenderLayers.debugQuads());
 	}
 
-	/** Map borders (and the art's own outline) and chunk borders near the player, just above their feet. */
+	/** Map borders (gold) and the art's own outline near the player, just above their feet; only map borders, never chunks. */
 	private static void grid(VertexConsumer lines, MatrixStack.Entry entry, ClientPlayerEntity player, Plan plan, Vec3d cam) {
 		double y = Math.floor(player.getY()) + 0.02 - cam.y;
 		int px = player.getBlockX(), pz = player.getBlockZ();
 		int range = 48;
-		for (int c = (px - range) >> 4 << 4; c <= px + range; c += 16) {
-			boolean map = Math.floorMod(c + 64, 128) == 0;
-			int color = map ? 0xFFFFC030 : 0x60FFFFFF;
-			line(lines, entry, c - cam.x, y, pz - range - cam.z, c - cam.x, y, pz + range - cam.z, color, map ? 2.5f : 1f);
+		for (int c = Math.floorDiv(px - range + 64, 128) * 128 - 64; c <= px + range; c += 128) {
+			if (c < px - range) continue;
+			line(lines, entry, c - cam.x, y, pz - range - cam.z, c - cam.x, y, pz + range - cam.z, 0xFFFFC030, 2.5f);
 		}
-		for (int c = (pz - range) >> 4 << 4; c <= pz + range; c += 16) {
-			boolean map = Math.floorMod(c + 64, 128) == 0;
-			int color = map ? 0xFFFFC030 : 0x60FFFFFF;
-			line(lines, entry, px - range - cam.x, y, c - cam.z, px + range - cam.x, y, c - cam.z, color, map ? 2.5f : 1f);
+		for (int c = Math.floorDiv(pz - range + 64, 128) * 128 - 64; c <= pz + range; c += 128) {
+			if (c < pz - range) continue;
+			line(lines, entry, px - range - cam.x, y, c - cam.z, px + range - cam.x, y, c - cam.z, 0xFFFFC030, 2.5f);
 		}
 		if (plan != null) {
 			// The art's outline, and the reference row north of it.
