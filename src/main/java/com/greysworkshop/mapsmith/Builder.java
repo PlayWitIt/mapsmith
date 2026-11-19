@@ -2,6 +2,7 @@ package com.greysworkshop.mapsmith;
 
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.Blocks;
 import net.minecraft.block.ShapeContext;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
@@ -507,8 +508,31 @@ final class Builder {
 	}
 
 	/** Pillaring up: the filler block into {@code cell}, against the block under it. */
+	/** Blocks dug up on the way that are fine to stand on for a moment: never sand or gravel (they fall). */
+	private static final Block[] JUNK = {Blocks.COBBLESTONE, Blocks.DIRT, Blocks.COBBLED_DEEPSLATE, Blocks.NETHERRACK, Blocks.STONE,
+			Blocks.ANDESITE, Blocks.DIORITE, Blocks.GRANITE, Blocks.TUFF, Blocks.DEEPSLATE, Blocks.COARSE_DIRT, Blocks.SANDSTONE,
+			Blocks.BLACKSTONE, Blocks.BASALT, Blocks.END_STONE, Blocks.MUD, Blocks.CLAY, Blocks.TERRACOTTA};
+
+	/**
+	 * What to pillar up with: the filler if it's carried, else any junk block dug up on the way (one the art doesn't use
+	 * first), so falling in a hole never strands it. -1 if there's nothing.
+	 */
+	static int pillarSlot(PlayerInventory inv, Plan plan) {
+		int slot = find(inv, plan.filler.asItem());
+		if (slot >= 0) return slot;
+		java.util.Set<Block> used = new java.util.HashSet<>(java.util.Arrays.asList(plan.blockFor));
+		int spare = -1;
+		for (Block b : JUNK) {
+			int i = find(inv, b.asItem());
+			if (i < 0) continue;
+			if (!used.contains(b)) return i;
+			if (spare < 0) spare = i;
+		}
+		return spare;
+	}
+
 	private static boolean placeFiller(MinecraftClient client, ClientPlayerEntity player, ClientWorld world, Plan plan, BlockPos cell) {
-		int slot = find(player.getInventory(), plan.filler.asItem());
+		int slot = pillarSlot(player.getInventory(), plan);
 		BlockPos below = cell.down();
 		if (slot < 0 || !BlockPalette.solid(world.getBlockState(below)) || opensScreen(world, below)) {
 			debug("can't pillar up at {}: {}", cell, slot < 0 ? "no " + plan.filler : "nothing under it (" + world.getBlockState(below) + ")");
@@ -722,7 +746,7 @@ final class Builder {
 		}
 		int[] bounds = {plan.x0 - 6, plan.y0 - 3, plan.z0 - 7, plan.x0 + plan.width() + 5, plan.topY() + 3, plan.z0 + plan.height() + 5};
 		BlockPos t = target;
-		boolean canTower = find(player.getInventory(), plan.filler.asItem()) >= 0;
+		boolean canTower = pillarSlot(player.getInventory(), plan) >= 0;
 		walker.placeUnder = cell -> placeFiller(client, player, world, plan, cell);
 		walker.breakUnder = cell -> {
 			if (breaking == null) startBreaking(client, player, world, cell);
@@ -740,7 +764,7 @@ final class Builder {
 				cell -> plan.kind(cell.getX(), cell.getY(), cell.getZ()) == Plan.Kind.CLEAR && MapsmithConfig.INSTANCE.fixMistakes);
 		if (!ok) {
 			planWait = 5;
-			debug("no path to {}", target);
+			debug("no path to {}: {}", target, walker.lastFail);
 			skipNode.put(nodeKey(plan, target), tick);
 			goal = null;
 			if (++failures > 12) stop(client, State.PAUSED, Text.translatable("mapsmith.builder.stuck").formatted(Formatting.RED));

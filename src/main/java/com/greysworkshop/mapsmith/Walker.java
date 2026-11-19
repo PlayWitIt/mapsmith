@@ -103,6 +103,9 @@ final class Walker {
 	 * As above; with {@code tower} (null for none), it may also pillar up: jump and place a block under itself, in cells
 	 * {@code tower} allows. That's how it reaches blocks higher than anything it can walk up to.
 	 */
+	/** Why the last plan found no way (for the debug log). */
+	String lastFail = "";
+
 	/** Where the goal roughly is, to search towards it first (far goals); null to search evenly. */
 	BlockPos aim;
 
@@ -185,6 +188,8 @@ final class Walker {
 			}
 		}
 		if (found == null) {
+			lastFail = "searched " + expanded + " spots from " + start + (open.isEmpty() ? ", nowhere left to go" : ", gave up at the limit")
+					+ "; start standable " + standable(world, start);
 			path = List.of();
 			return false;
 		}

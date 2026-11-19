@@ -180,8 +180,13 @@ final class UltimateTest {
 
 	private static void place(MinecraftClient client) {
 		// Into the map square we're in, then stand on the ground in the middle of the part to build, and place there.
-		int x0 = Plan.mapCorner(client.player.getBlockX()), z0 = Plan.mapCorner(client.player.getBlockZ());
 		int[] r = region != null ? region : new int[] {0, 0, 127, 127};
+		// As a player would: fly to flat, dry land first. Of the map squares round here, the one whose part to build is
+		// flattest (least between its lowest and highest ground) with the least water.
+		int[] square = server(client, s -> flattest(s.getOverworld(), Plan.mapCorner(client.player.getBlockX()),
+				Plan.mapCorner(client.player.getBlockZ()), r));
+		int x0 = square[0], z0 = square[1];
+		log("flattest map square nearby: corner " + x0 + ", " + z0 + ", ground from y " + square[2] + " to " + square[3] + ", " + square[4] + " wet samples");
 		int cx = x0 + (r[0] + r[2]) / 2, cz = z0 + (r[1] + r[3]) / 2;
 		// On dry ground: the nearest to the middle (the middle may be a lake).
 		int[] at = server(client, s -> {
@@ -191,13 +196,14 @@ final class UltimateTest {
 					for (int dz = -d; dz <= d; dz++) {
 						if (Math.max(Math.abs(dx), Math.abs(dz)) != d) continue;
 						int x = cx + dx, z = cz + dz;
-						int top = w.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, x, z);
+						int top = surface(w, x, z);
 						if (w.getFluidState(new net.minecraft.util.math.BlockPos(x, top - 1, z)).isEmpty()) return new int[] {x, top, z};
 					}
 				}
 			}
-			return new int[] {cx, w.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, cx, cz), cz};
+			return new int[] {cx, surface(w, cx, cz), cz};
 		});
+		log("standing on the surface at " + at[0] + ", " + at[1] + ", " + at[2]);
 		command(client, "tp @p " + at[0] + ".5 " + at[1] + " " + at[2] + ".5");
 		phase = "placing";
 		client.execute(() -> client.execute(() -> {
@@ -308,6 +314,52 @@ final class UltimateTest {
 		log("REPORT ticks spent gliding: " + glideTicks + " · elytra durability " + client.player.getEquippedStack(net.minecraft.entity.EquipmentSlot.CHEST).getDamage()
 				+ " used · armour: " + client.player.getEquippedStack(net.minecraft.entity.EquipmentSlot.CHEST).getItem());
 		log("REPORT health " + client.player.getHealth() + ", hunger " + client.player.getHungerManager().getFoodLevel());
+	}
+
+	/** {corner x, corner z, lowest, highest, wet samples} of the flattest map square within 2 squares each way. */
+	private static int[] flattest(net.minecraft.server.world.ServerWorld w, int x0, int z0, int[] r) {
+		int[] best = null;
+		int bestScore = Integer.MAX_VALUE;
+		for (int i = -2; i <= 2; i++) {
+			for (int j = -2; j <= 2; j++) {
+				int sx = x0 + i * 128, sz = z0 + j * 128;
+				int lo = Integer.MAX_VALUE, hi = Integer.MIN_VALUE, wet = 0;
+				for (int px = r[0]; px <= r[2]; px += 6) {
+					for (int pz = r[1]; pz <= r[3]; pz += 6) {
+						int x = sx + px, z = sz + pz;
+						int top = surface(w, x, z);
+						if (!w.getFluidState(new net.minecraft.util.math.BlockPos(x, top - 1, z)).isEmpty()) wet++;
+						lo = Math.min(lo, top);
+						hi = Math.max(hi, top);
+					}
+				}
+				int score = (hi - lo) * 4 + wet * 10;
+				if (score < bestScore) {
+					bestScore = score;
+					best = new int[] {sx, sz, lo, hi, wet};
+				}
+			}
+		}
+		return best;
+	}
+
+	/**
+	 * The first air above the ground at (x, z), found by looking down the column block by block in generated land (a
+	 * heightmap read too early puts you underground). Leaves and plants don't count as ground.
+	 */
+	private static int surface(net.minecraft.server.world.ServerWorld w, int x, int z) {
+		w.getChunk(x >> 4, z >> 4);
+		net.minecraft.util.math.BlockPos.Mutable p = new net.minecraft.util.math.BlockPos.Mutable(x, w.getTopYInclusive(), z);
+		for (; p.getY() > w.getBottomY(); p.move(0, -1, 0)) {
+			var st = w.getBlockState(p);
+			if (st.isAir() || st.isIn(net.minecraft.registry.tag.BlockTags.LEAVES) || st.isReplaceable() || !st.getFluidState().isEmpty() && st.isOf(net.minecraft.block.Blocks.WATER)) {
+				if (!st.getFluidState().isEmpty()) return p.getY() + 1;
+				continue;
+			}
+			if (st.isIn(net.minecraft.registry.tag.BlockTags.LOGS)) continue;
+			return p.getY() + 1;
+		}
+		return w.getTopYInclusive();
 	}
 
 	private static String elapsed() {
